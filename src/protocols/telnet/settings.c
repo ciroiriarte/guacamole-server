@@ -65,6 +65,7 @@ const char* GUAC_TELNET_CLIENT_ARGS[] = {
     "login-failure-regex",
     "disable-copy",
     "disable-paste",
+    "text-output",
     "wol-send-packet",
     "wol-mac-addr",
     "wol-broadcast-addr",
@@ -261,7 +262,17 @@ enum TELNET_ARGS_IDX {
      * the clipboard. By default, clipboard access is not blocked.
      */
     IDX_DISABLE_PASTE,
-    
+
+    /**
+     * Whether the raw terminal (PTY) byte stream should be teed, verbatim, to
+     * an outbound "STDOUT" pipe stream in addition to the normal graphical
+     * display. This enables a native/CLI Guacamole client to render the
+     * session as true in-terminal text. If set to "true", text-output mode is
+     * enabled; by default it is disabled. Honored only when copying from the
+     * terminal is not disabled (see IDX_DISABLE_COPY).
+     */
+    IDX_TEXT_OUTPUT,
+
     /**
      * Whether to send the magic Wake-on-LAN (WoL) packet.  If set to "true"
      * the WoL packet will be sent prior to attempting to connect to the remote
@@ -529,7 +540,12 @@ guac_telnet_settings* guac_telnet_parse_args(guac_user* user,
     settings->disable_paste =
         guac_user_parse_args_boolean(user, GUAC_TELNET_CLIENT_ARGS, argv,
                 IDX_DISABLE_PASTE, false);
-    
+
+    /* Parse raw text-output mode flag */
+    settings->text_output =
+        guac_user_parse_args_boolean(user, GUAC_TELNET_CLIENT_ARGS, argv,
+                IDX_TEXT_OUTPUT, false);
+
     /* Parse Wake-on-LAN (WoL) settings */
     settings->wol_send_packet =
         guac_user_parse_args_boolean(user, GUAC_TELNET_CLIENT_ARGS, argv,
