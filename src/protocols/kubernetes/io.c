@@ -42,6 +42,9 @@ void guac_kubernetes_receive_data(guac_client* client,
         /* Write STDOUT / STDERR directly to terminal as output */
         case GUAC_KUBERNETES_CHANNEL_STDOUT:
         case GUAC_KUBERNETES_CHANNEL_STDERR:
+            /* Tee the raw remote byte stream to the text-output pipe, if
+             * enabled. Has no effect unless text-output mode opened the pipe. */
+            guac_terminal_text_output_write(kubernetes_client->term, buffer, length);
             guac_terminal_write(kubernetes_client->term, buffer, length);
             break;
 

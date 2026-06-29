@@ -58,6 +58,7 @@ const char* GUAC_KUBERNETES_CLIENT_ARGS[] = {
     "scrollback",
     "disable-copy",
     "disable-paste",
+    "text-output",
     NULL
 };
 
@@ -255,6 +256,16 @@ enum KUBERNETES_ARGS_IDX {
      */
     IDX_DISABLE_PASTE,
 
+    /**
+     * Whether the raw terminal (PTY) byte stream should be teed, verbatim, to
+     * an outbound "STDOUT" pipe stream in addition to the normal graphical
+     * display. This enables a native/CLI Guacamole client to render the
+     * session as true in-terminal text. If set to "true", text-output mode is
+     * enabled; by default it is disabled. Honored only when copying from the
+     * terminal is not disabled (see IDX_DISABLE_COPY).
+     */
+    IDX_TEXT_OUTPUT,
+
     KUBERNETES_ARGS_COUNT
 };
 
@@ -427,6 +438,11 @@ guac_kubernetes_settings* guac_kubernetes_parse_args(guac_user* user,
     settings->disable_paste =
         guac_user_parse_args_boolean(user, GUAC_KUBERNETES_CLIENT_ARGS, argv,
                 IDX_DISABLE_PASTE, false);
+
+    /* Parse raw text-output mode flag */
+    settings->text_output =
+        guac_user_parse_args_boolean(user, GUAC_KUBERNETES_CLIENT_ARGS, argv,
+                IDX_TEXT_OUTPUT, false);
 
     /* Parsing was successful */
     return settings;
