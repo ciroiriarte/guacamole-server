@@ -326,6 +326,20 @@ void* ssh_client_thread(void* data) {
                 settings->typescript_write_existing);
     }
 
+    /* Enable raw text-output mode, if requested. This tees the raw terminal
+     * (PTY) byte stream to an outbound "STDOUT" pipe for native/CLI clients,
+     * in addition to the normal graphical display. As text-output is
+     * effectively a copy/exfiltration channel, it is gated behind
+     * disable-copy. */
+    if (settings->text_output) {
+        if (settings->disable_copy)
+            guac_client_log(client, GUAC_LOG_WARNING, "\"text-output\" was "
+                    "requested but is being ignored because copying from the "
+                    "terminal is disabled (\"disable-copy\").");
+        else
+            guac_terminal_text_output_open(ssh_client->term, "STDOUT");
+    }
+
     /* Get user and credentials */
     ssh_client->user = guac_ssh_get_user(client);
     if (ssh_client->user == NULL) {
@@ -522,6 +536,11 @@ void* ssh_client_thread(void* data) {
 
         /* Attempt to write data received. Exit on failure. */
         if (bytes_read > 0) {
+
+            /* Tee the raw PTY byte stream to the text-output pipe, if enabled.
+             * Has no effect unless text-output mode opened the pipe. */
+            guac_terminal_text_output_write(ssh_client->term, buffer, bytes_read);
+
             int written = guac_terminal_write(ssh_client->term, buffer, bytes_read);
             if (written < 0)
                 break;
