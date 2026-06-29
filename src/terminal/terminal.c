@@ -458,6 +458,10 @@ guac_terminal* guac_terminal_create(guac_client* client,
     /* Init pipe stream (output to display by default) */
     term->pipe_stream = NULL;
 
+    /* No text-output pipe stream by default */
+    term->text_output_stream = NULL;
+    term->text_output_length = 0;
+
     /* No typescript by default */
     term->typescript = NULL;
 
@@ -539,6 +543,9 @@ void guac_terminal_free(guac_terminal* term) {
 
     /* Close and flush any open pipe stream */
     guac_terminal_pipe_stream_close(term);
+
+    /* Close and flush any open text-output pipe stream */
+    guac_terminal_text_output_close(term);
 
     /* Close and flush any active typescript */
     guac_terminal_typescript_free(term->typescript);
@@ -1378,6 +1385,11 @@ void guac_terminal_flush(guac_terminal* terminal) {
     if (terminal->pipe_stream_flags & GUAC_TERMINAL_PIPE_AUTOFLUSH)
         guac_terminal_pipe_stream_flush(terminal);
 
+    /* Flush text-output pipe stream, if open, at this frame boundary. The
+     * terminal lock is already held by the caller of guac_terminal_flush(). */
+    if (terminal->text_output_stream != NULL)
+        guac_terminal_text_output_flush(terminal);
+
     /* Flush display state */
     guac_terminal_select_redraw(terminal);
     guac_terminal_commit_cursor(terminal);
@@ -2025,6 +2037,117 @@ void guac_terminal_pipe_stream_close(guac_terminal* term) {
                 "Terminal output now redirected to display.");
 
     }
+
+}
+
+void guac_terminal_text_output_open(guac_terminal* term, const char* name) {
+
+    guac_client* client = term->client;
+    guac_socket* socket = client->socket;
+
+    /* Close existing text-output stream, if any */
+    guac_terminal_text_output_close(term);
+
+    guac_terminal_lock(term);
+
+    /* Allocate and assign new text-output stream */
+    term->text_output_stream = guac_client_alloc_stream(client);
+    term->text_output_length = 0;
+
+    /* Open stream as a raw byte stream; it carries the remote PTY output
+     * verbatim (including ANSI/escape sequences). The mimetype is advisory:
+     * blob payloads are base64-encoded and thus binary-safe regardless. */
+    guac_protocol_send_pipe(socket, term->text_output_stream,
+            "application/octet-stream", name);
+
+    guac_terminal_unlock(term);
+
+    /* Log redirect at debug level */
+    guac_client_log(client, GUAC_LOG_DEBUG, "Raw terminal output now teed to "
+            "text-output pipe \"%s\".", name);
+
+}
+
+void guac_terminal_text_output_write(guac_terminal* term,
+        const char* buffer, int length) {
+
+    /* Ignore if no text-output stream is open (fast path, re-checked under
+     * lock below) */
+    if (term->text_output_stream == NULL)
+        return;
+
+    guac_terminal_lock(term);
+
+    /* Append data only if the stream is still open */
+    if (term->text_output_stream != NULL) {
+
+        while (length > 0) {
+
+            /* Flush buffer if no space is available */
+            if (term->text_output_length == sizeof(term->text_output_buffer))
+                guac_terminal_text_output_flush(term);
+
+            /* Append as many bytes as will fit in the buffer */
+            int chunk = sizeof(term->text_output_buffer)
+                    - term->text_output_length;
+            if (chunk > length)
+                chunk = length;
+
+            memcpy(term->text_output_buffer + term->text_output_length,
+                    buffer, chunk);
+
+            term->text_output_length += chunk;
+            buffer += chunk;
+            length -= chunk;
+
+        }
+
+    }
+
+    guac_terminal_unlock(term);
+
+}
+
+void guac_terminal_text_output_flush(guac_terminal* term) {
+
+    guac_client* client = term->client;
+    guac_socket* socket = client->socket;
+    guac_stream* stream = term->text_output_stream;
+
+    /* Write blob if data exists in buffer */
+    if (stream != NULL && term->text_output_length > 0) {
+        guac_protocol_send_blob(socket, stream,
+                term->text_output_buffer, term->text_output_length);
+        term->text_output_length = 0;
+    }
+
+}
+
+void guac_terminal_text_output_close(guac_terminal* term) {
+
+    guac_client* client = term->client;
+    guac_socket* socket = client->socket;
+
+    guac_terminal_lock(term);
+
+    /* Close any existing text-output stream */
+    if (term->text_output_stream != NULL) {
+
+        /* Flush remaining buffered data and write end of stream */
+        guac_terminal_text_output_flush(term);
+        guac_protocol_send_end(socket, term->text_output_stream);
+
+        /* Destroy stream */
+        guac_client_free_stream(client, term->text_output_stream);
+        term->text_output_stream = NULL;
+
+        /* Log closure at debug level */
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Text-output pipe stream closed.");
+
+    }
+
+    guac_terminal_unlock(term);
 
 }
 
