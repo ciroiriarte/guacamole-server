@@ -111,7 +111,7 @@ char* guac_strnstr(const char *haystack, const char *needle, size_t len) {
         return (char *)haystack;
 
     /* Use memchr to find candidates. It might be optimized in asm. */
-    while (off < len && NULL != (chr = memchr(haystack + off, needle[0], len - off))) {
+    while (off < len && NULL != (chr = (char*) memchr(haystack + off, needle[0], len - off))) {
         /* chr is guaranteed to be in bounds of and >= haystack. */
         off = chr - haystack;
         /* If needle would go beyond provided len, it doesn't exist in haystack. */
