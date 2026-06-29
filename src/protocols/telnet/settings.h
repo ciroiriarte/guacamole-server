@@ -189,6 +189,15 @@ typedef struct guac_telnet_settings {
     bool disable_paste;
 
     /**
+     * Whether raw text-output mode is enabled. If set, the raw terminal (PTY)
+     * byte stream is teed, verbatim, to an outbound "STDOUT" pipe stream in
+     * addition to the normal graphical display, enabling a native/CLI client
+     * to render the session as true in-terminal text. Honored only when
+     * disable_copy is not set, as text-output is effectively a copy channel.
+     */
+    bool text_output;
+
+    /**
      * The path in which the typescript should be saved, if enabled. If no
      * typescript should be saved, this will be NULL.
      */
