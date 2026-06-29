@@ -147,6 +147,33 @@ struct guac_terminal {
     int pipe_buffer_length;
 
     /**
+     * The currently-open outbound "text-output" pipe stream, to which the raw
+     * byte stream received from the remote terminal (PTY) is teed when
+     * text-output mode is enabled, or NULL if text-output mode is disabled.
+     *
+     * Unlike pipe_stream (used by the in-band guacctl redirection mechanism),
+     * this stream carries the unmodified remote byte stream, including
+     * ANSI/escape sequences, and operates in addition to the normal terminal
+     * display without altering rendering. It is fed directly from each
+     * protocol's PTY read loop, upstream of the terminal emulator, so it is
+     * also charset-agnostic (the exact bytes are forwarded to the client).
+     */
+    guac_stream* text_output_stream;
+
+    /**
+     * Buffer of raw terminal bytes pending write to text_output_stream. Data
+     * within this buffer will be flushed when either (1) the buffer is full
+     * and more data needs to be written, (2) a frame boundary is reached (via
+     * guac_terminal_flush()), or (3) the text-output stream is closed.
+     */
+    char text_output_buffer[6048];
+
+    /**
+     * The number of bytes currently stored within text_output_buffer.
+     */
+    int text_output_length;
+
+    /**
      * The currently-active typescript recording all terminal output, or NULL
      * if no typescript is being used for the terminal session.
      */

@@ -1019,6 +1019,77 @@ int guac_terminal_send_string(guac_terminal* term, const char* data);
 int guac_terminal_write(guac_terminal* term, const char* buffer, int length);
 
 /**
+ * Opens a new outbound "text-output" pipe stream associated with the given
+ * terminal. Once open, the raw byte stream received from the remote terminal
+ * may be teed to this stream via guac_terminal_text_output_write(), in
+ * addition to (and without affecting) the normal terminal display.
+ *
+ * Unlike the guacctl pipe stream opened by guac_terminal_pipe_stream_open(),
+ * this stream carries the unmodified remote byte stream verbatim, including
+ * ANSI/escape sequences, and does not alter rendering. It is intended to back
+ * a native/CLI Guacamole client that presents the session as true in-terminal
+ * text. If a text-output stream is already open, it will be closed first.
+ *
+ * @param term
+ *     The terminal for which the text-output pipe stream should be opened.
+ *
+ * @param name
+ *     The name of the pipe stream to open (e.g. "STDOUT").
+ */
+void guac_terminal_text_output_open(guac_terminal* term, const char* name);
+
+/**
+ * Writes a block of raw bytes to the text-output pipe stream currently open
+ * and associated with the given terminal. The text-output stream must already
+ * have been opened via guac_terminal_text_output_open(). If no text-output
+ * stream is open, this function has no effect. Data written through this
+ * function may be buffered, and will be flushed automatically at frame
+ * boundaries or when the internal buffer is full.
+ *
+ * This function is thread-safe: it acquires the terminal lock internally and
+ * may safely be called from a protocol's PTY read loop concurrently with
+ * frame rendering.
+ *
+ * @param term
+ *     The terminal whose currently-open text-output pipe stream should be
+ *     written to.
+ *
+ * @param buffer
+ *     A buffer containing the raw bytes to write to the text-output stream.
+ *
+ * @param length
+ *     The number of bytes within the given buffer to write.
+ */
+void guac_terminal_text_output_write(guac_terminal* term,
+        const char* buffer, int length);
+
+/**
+ * Flushes any data currently buffered for the currently-open text-output pipe
+ * stream associated with the given terminal. If no text-output stream is open
+ * or no data is buffered, this function has no effect.
+ *
+ * The caller MUST hold the terminal lock, or otherwise guarantee that no
+ * other thread is concurrently accessing the terminal (as is the case during
+ * single-threaded teardown). This function is invoked internally at frame
+ * boundaries by guac_terminal_flush().
+ *
+ * @param term
+ *     The terminal whose text-output stream buffer should be flushed.
+ */
+void guac_terminal_text_output_flush(guac_terminal* term);
+
+/**
+ * Closes the currently-open text-output pipe stream associated with the given
+ * terminal. Any data currently buffered will be flushed prior to closure. If
+ * no text-output stream is open, this function has no effect.
+ *
+ * @param term
+ *     The terminal whose currently-open text-output pipe stream should be
+ *     closed.
+ */
+void guac_terminal_text_output_close(guac_terminal* term);
+
+/**
  * Initializes the handlers of the given guac_stream such that it serves as the
  * source of input to the terminal. Other input sources will be temporarily
  * ignored until the stream is closed through receiving an "end" instruction.
