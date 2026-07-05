@@ -4,18 +4,36 @@ Terminal text-output mode
 This branch adds an opt-in terminal connection parameter named
 `text-output` for SSH, telnet, and Kubernetes connections.
 
-When `text-output` is set to `true`, guacd tees the raw bytes received from the
-remote terminal/PTY to an outbound Guacamole pipe stream named `STDOUT` while
-continuing to render the normal graphical terminal display. Clients can consume
-that pipe to implement CLI-style access to terminal sessions without scraping
-pixels from the display.
+When `text-output` is enabled, guacd tees the raw bytes received from the remote
+terminal/PTY to an outbound Guacamole pipe stream named `STDOUT`. Clients can
+consume that pipe to implement CLI-style access to terminal sessions without
+scraping pixels from the display.
+
+Modes
+-----
+
+The parameter accepts two enabled values:
+
+* `text-output=true` — **tee** mode: the raw bytes are teed to the `STDOUT`
+  pipe *and* the normal graphical terminal display continues to be rendered, so
+  browser clients still work. Use this when a connection may be viewed both
+  graphically and by a text/CLI client.
+
+* `text-output=raw` — **headless** mode: the graphical terminal is not rendered
+  at all. The raw bytes are delivered only via the `STDOUT` pipe, skipping the
+  terminal emulator and its graphical instruction stream. This eliminates the
+  per-frame glyph rasterization/encoding and the graphical bytes on the wire, at
+  the cost of no usable graphical display. Use this for connections consumed
+  solely by a text/CLI client.
+
+Any other value (including `false` or omission) leaves text-output disabled.
 
 Supported protocols
 -------------------
 
-* SSH: `text-output=true`
-* Telnet: `text-output=true`
-* Kubernetes: `text-output=true`
+* SSH: `text-output=true` | `text-output=raw`
+* Telnet: `text-output=true` | `text-output=raw`
+* Kubernetes: `text-output=true` | `text-output=raw`
 
 The parameter is intentionally opt-in. Existing connections continue to behave
 normally unless the parameter is explicitly enabled.

@@ -577,9 +577,17 @@ guac_ssh_settings* guac_ssh_parse_args(guac_user* user,
                 IDX_DISABLE_PASTE, false);
 
     /* Parse raw text-output mode flag */
-    settings->text_output =
-        guac_user_parse_args_boolean(user, GUAC_SSH_CLIENT_ARGS, argv,
-                IDX_TEXT_OUTPUT, false);
+    /* Parse text-output mode. Accepts "true" (tee mode: the graphical display
+     * is preserved for browser clients) or "raw" (headless: the graphical
+     * terminal is not rendered, eliminating the graphical instruction stream
+     * and its rendering cost). Any other value disables text-output. */
+    char* text_output_mode =
+        guac_user_parse_args_string(user, GUAC_SSH_CLIENT_ARGS, argv,
+                IDX_TEXT_OUTPUT, "false");
+    settings->text_output_raw = (strcmp(text_output_mode, "raw") == 0);
+    settings->text_output = settings->text_output_raw
+            || (strcmp(text_output_mode, "true") == 0);
+    guac_mem_free(text_output_mode);
 
     /* Parse Wake-on-LAN (WoL) parameters. */
     settings->wol_send_packet =

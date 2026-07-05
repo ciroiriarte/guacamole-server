@@ -24,6 +24,9 @@ Options:
     --expect-absent S   Require S to NOT appear (e.g. to show dropped output
                         under backpressure when combined with --no-ack).
     --expect-no-pipe    Pass only if NO STDOUT pipe is opened (negative test).
+    --max-graphics N    Require graphical-instruction bytes (img/blob/rect/...)
+                        to stay at or below N (e.g. to show raw mode suppresses
+                        the graphical stream).
     --no-ack            Do not acknowledge blobs, to exercise flow control.
 
 Example:
@@ -46,6 +49,12 @@ PORT = int(os.environ.get("GUACD_PORT", "4822"))
 def enc(*elems):
     """Encode a Guacamole protocol instruction from its elements."""
     return ",".join("%d.%s" % (len(e), e) for e in elems) + ";"
+
+
+def enc_len(elems):
+    """Exact on-wire byte length of an instruction, from its (bytes) elements."""
+    n = sum(len(str(len(e))) + 1 + len(e) for e in elems)  # "LEN" + "." + value
+    return n + (len(elems) - 1) + 1                          # commas + ';'
 
 
 class Parser:
@@ -98,6 +107,7 @@ def main():
     expect_absent = None
     expect_no_pipe = False
     no_ack = False
+    max_graphics = None
     a = sys.argv[3:]
     for j, v in enumerate(a):
         if v == "--secs":
@@ -108,6 +118,8 @@ def main():
             expect_absent = a[j + 1]
         elif v == "--expect-no-pipe":
             expect_no_pipe = True
+        elif v == "--max-graphics":
+            max_graphics = int(a[j + 1])
         elif v == "--no-ack":
             no_ack = True
 
@@ -150,6 +162,8 @@ def main():
     stdout_idx = None
     captured = bytearray()
     pipe_seen = False
+    graphics_bytes = 0
+    control_ops = ("sync", "ready", "args", "nop", "disconnect", "error")
     deadline = time.time() + secs
     s.settimeout(1.0)
     while time.time() < deadline:
@@ -163,6 +177,13 @@ def main():
         p.feed(data)
         for inst in p:
             op = inst[0].decode(errors="replace")
+            # Graphics accounting: anything that is neither the STDOUT text pipe
+            # nor a control/handshake instruction is graphical output.
+            is_stdout = (op == "pipe" and len(inst) > 3 and inst[3] == b"STDOUT") \
+                or (op in ("blob", "end") and stdout_idx is not None
+                    and inst[1].decode() == stdout_idx)
+            if op not in control_ops and not is_stdout:
+                graphics_bytes += enc_len(inst)
             if op == "sync":
                 # Echo sync to keep guacd's frame loop (and pipe flushing) alive.
                 ts = inst[1].decode() if len(inst) > 1 else "0"
@@ -191,6 +212,7 @@ def main():
     snippet = re.sub(r"[\x00-\x08\x0e-\x1f]", ".",
                      captured.decode("utf-8", errors="replace"))[:400]
     print("snippet            : %r" % snippet)
+    print("graphics bytes     : %d" % graphics_bytes)
 
     if expect_no_pipe:
         ok = not pipe_seen
@@ -205,6 +227,10 @@ def main():
             absent = expect_absent.encode() not in captured
             print("expect absent %r : %s" % (expect_absent, absent))
             ok = ok and absent
+    if max_graphics is not None:
+        within = graphics_bytes <= max_graphics
+        print("graphics <= %-6d : %s" % (max_graphics, within))
+        ok = ok and within
     print("VERDICT            : %s" % ("PASS" if ok else "FAIL"))
     sys.exit(0 if ok else 1)
 

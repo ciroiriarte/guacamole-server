@@ -185,6 +185,16 @@ struct guac_terminal {
     int text_output_inflight;
 
     /**
+     * Whether buffered text-output should be flushed immediately as it is
+     * written, rather than at terminal frame boundaries. This is required in
+     * raw (headless) text-output mode, where the graphical terminal is not
+     * rendered and thus the frame/render cycle that would otherwise flush the
+     * buffer never runs. When false, flushing is driven by guac_terminal_flush()
+     * (the graphical frame boundary) as usual.
+     */
+    bool text_output_flush_immediately;
+
+    /**
      * The currently-active typescript recording all terminal output, or NULL
      * if no typescript is being used for the terminal session.
      */

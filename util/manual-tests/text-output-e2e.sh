@@ -127,5 +127,35 @@ python3 "$DRIVER" kubernetes \
 check $?
 pkill -f "$MOCK" 2>/dev/null
 
+# =========================== RAW MODE ===========================
+# text-output=raw is headless: the graphical terminal is not rendered, so the
+# raw bytes are still delivered via the STDOUT pipe while the graphical
+# instruction stream is suppressed (graphics bytes stay at the tiny init
+# residual, well under the --max-graphics bound).
+
+hr "RAW SSH: text delivered, graphics suppressed"
+python3 "$DRIVER" ssh \
+  "{\"hostname\":\"$SSH_HOST\",\"port\":\"$SSH_PORT\",\"username\":\"$SSH_USER\",\"password\":\"$SSH_PASS\",\"text-output\":\"raw\",\"command\":\"printf '\\\\033[31mRAW-SSH marker\\\\033[0m\\\\r\\\\n'; sleep 2\"}" \
+  --secs 10 --expect "RAW-SSH marker" --max-graphics 5000
+check $?
+
+hr "RAW TELNET: text delivered, graphics suppressed"
+pkill -f "TCP-LISTEN:$TELNET_PORT" 2>/dev/null; sleep 0.3
+socat TCP-LISTEN:"$TELNET_PORT",reuseaddr,fork EXEC:"$ANSI",pty,stderr & sleep 0.5
+python3 "$DRIVER" telnet \
+  "{\"hostname\":\"127.0.0.1\",\"port\":\"$TELNET_PORT\",\"text-output\":\"raw\"}" \
+  --secs 8 --expect "TELNET-TEXT-OUTPUT marker" --max-graphics 5000
+check $?
+pkill -f "TCP-LISTEN:$TELNET_PORT" 2>/dev/null
+
+hr "RAW KUBERNETES: 60-line flood delivered, graphics suppressed"
+pkill -f "$MOCK" 2>/dev/null; sleep 0.3
+python3 "$MOCK" "$K8S_PORT" 60 >"$TMP/k8s.log" 2>&1 & sleep 1
+python3 "$DRIVER" kubernetes \
+  "{\"hostname\":\"127.0.0.1\",\"port\":\"$K8S_PORT\",\"use-ssl\":\"false\",\"namespace\":\"default\",\"pod\":\"testpod\",\"exec-command\":\"/bin/sh\",\"text-output\":\"raw\"}" \
+  --secs 12 --expect "K8S-TEXT-OUTPUT line 59" --max-graphics 5000
+check $?
+pkill -f "$MOCK" 2>/dev/null
+
 hr "OVERALL: $([ $RESULT -eq 0 ] && echo ALL-PASS || echo SOME-FAILED)"
 exit $RESULT
