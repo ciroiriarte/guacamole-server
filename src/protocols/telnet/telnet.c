@@ -283,7 +283,13 @@ static void __guac_telnet_event_handler(telnet_t* telnet, telnet_event_t* event,
             /* Tee the raw remote byte stream to the text-output pipe, if
              * enabled. Has no effect unless text-output mode opened the pipe. */
             guac_terminal_text_output_write(telnet_client->term, event->data.buffer, event->data.size);
-            guac_terminal_write(telnet_client->term, event->data.buffer, event->data.size);
+
+            /* In raw text-output mode the graphical terminal is not rendered:
+             * the remote bytes are delivered only via the text-output pipe,
+             * skipping the terminal emulator and its graphical output. */
+            if (!settings->text_output_raw)
+                guac_terminal_write(telnet_client->term, event->data.buffer, event->data.size);
+
             guac_telnet_search(client, event->data.buffer, event->data.size);
             break;
 
@@ -619,7 +625,8 @@ void* guac_telnet_client_thread(void* data) {
                     "requested but is being ignored because copying from the "
                     "terminal is disabled (\"disable-copy\").");
         else
-            guac_terminal_text_output_open(telnet_client->term, "STDOUT");
+            guac_terminal_text_output_open(telnet_client->term, "STDOUT",
+                    settings->text_output_raw);
     }
 
     /* Open telnet session */

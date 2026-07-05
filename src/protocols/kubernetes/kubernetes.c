@@ -327,7 +327,8 @@ void* guac_kubernetes_client_thread(void* data) {
                     "requested but is being ignored because copying from the "
                     "terminal is disabled (\"disable-copy\").");
         else
-            guac_terminal_text_output_open(kubernetes_client->term, "STDOUT");
+            guac_terminal_text_output_open(kubernetes_client->term, "STDOUT",
+                    settings->text_output_raw);
     }
 
     /* Init libwebsockets context creation parameters */

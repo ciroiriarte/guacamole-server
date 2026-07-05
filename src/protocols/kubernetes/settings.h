@@ -195,6 +195,16 @@ typedef struct guac_kubernetes_settings {
     bool text_output;
 
     /**
+     * Whether text-output should run in "raw" (headless) mode. When set, the
+     * graphical terminal is not rendered from remote output: the raw bytes are
+     * delivered only via the text-output pipe, skipping the terminal emulator
+     * and its (CPU- and bandwidth-heavy) graphical instruction stream. Implies
+     * text_output. Intended for connections consumed solely by a text/CLI
+     * client, where nothing renders the graphical display.
+     */
+    bool text_output_raw;
+
+    /**
      * The path in which the typescript should be saved, if enabled. If no
      * typescript should be saved, this will be NULL.
      */

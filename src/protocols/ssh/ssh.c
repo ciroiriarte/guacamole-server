@@ -354,7 +354,8 @@ void* ssh_client_thread(void* data) {
                     "requested but is being ignored because copying from the "
                     "terminal is disabled (\"disable-copy\").");
         else
-            guac_terminal_text_output_open(ssh_client->term, "STDOUT");
+            guac_terminal_text_output_open(ssh_client->term, "STDOUT",
+                    settings->text_output_raw);
     }
 
     /* Get user and credentials */
@@ -563,9 +564,14 @@ void* ssh_client_thread(void* data) {
              * Has no effect unless text-output mode opened the pipe. */
             guac_terminal_text_output_write(ssh_client->term, buffer, bytes_read);
 
-            int written = guac_terminal_write(ssh_client->term, buffer, bytes_read);
-            if (written < 0)
-                break;
+            /* In raw text-output mode the graphical terminal is not rendered:
+             * the remote bytes are delivered only via the text-output pipe,
+             * skipping the terminal emulator and its graphical output. */
+            if (!settings->text_output_raw) {
+                int written = guac_terminal_write(ssh_client->term, buffer, bytes_read);
+                if (written < 0)
+                    break;
+            }
 
             total_read += bytes_read;
         }

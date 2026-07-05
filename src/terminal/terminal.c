@@ -3221,7 +3221,8 @@ static void* guac_terminal_text_output_close_owner(guac_user* owner, void* data)
 
 }
 
-void guac_terminal_text_output_open(guac_terminal* term, const char* name) {
+void guac_terminal_text_output_open(guac_terminal* term, const char* name,
+        int flush_immediately) {
 
     guac_client* client = term->client;
 
@@ -3232,6 +3233,7 @@ void guac_terminal_text_output_open(guac_terminal* term, const char* name) {
 
     term->text_output_length = 0;
     term->text_output_inflight = 0;
+    term->text_output_flush_immediately = flush_immediately;
 
     /* Allocate and open the stream on the connection owner's socket, so raw
      * output is delivered only to the owner (not broadcast to every user) and
@@ -3280,6 +3282,11 @@ void guac_terminal_text_output_write(guac_terminal* term,
             length -= chunk;
 
         }
+
+        /* In raw (headless) mode there is no graphical frame cycle to flush the
+         * buffer, so flush immediately as data arrives. */
+        if (term->text_output_flush_immediately)
+            guac_terminal_text_output_flush(term);
 
     }
 

@@ -1035,8 +1035,15 @@ int guac_terminal_write(guac_terminal* term, const char* buffer, int length);
  *
  * @param name
  *     The name of the pipe stream to open (e.g. "STDOUT").
+ *
+ * @param flush_immediately
+ *     Non-zero if buffered output should be flushed immediately as it is
+ *     written rather than at terminal frame boundaries. This is required in
+ *     raw (headless) mode, where the graphical frame/render cycle that would
+ *     otherwise drive flushing does not run.
  */
-void guac_terminal_text_output_open(guac_terminal* term, const char* name);
+void guac_terminal_text_output_open(guac_terminal* term, const char* name,
+        int flush_immediately);
 
 /**
  * Writes a block of raw bytes to the text-output pipe stream currently open
