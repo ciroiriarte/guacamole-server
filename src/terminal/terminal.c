@@ -3021,25 +3021,156 @@ void guac_terminal_pipe_stream_close(guac_terminal* term) {
 
 }
 
+/**
+ * Parameters for guac_terminal_text_output_open_owner(), passed through
+ * guac_client_for_owner().
+ */
+typedef struct guac_terminal_text_output_open_params {
+
+    /**
+     * The terminal whose text-output stream is being opened.
+     */
+    guac_terminal* term;
+
+    /**
+     * The name to assign to the opened pipe stream.
+     */
+    const char* name;
+
+} guac_terminal_text_output_open_params;
+
+/**
+ * Guacamole user callback (guac_client_for_owner()) which allocates and opens
+ * the text-output pipe stream on the connection owner's socket. The owner is
+ * the natural (and, for the native CLI use case, sole) consumer of the raw
+ * text stream. Allocating a user-level stream, rather than a client-level one,
+ * ensures the raw output is delivered only to that user instead of being
+ * broadcast to every user sharing the connection, and yields an even stream
+ * index so that "ack" instructions from the client are routed to the stream.
+ *
+ * @param owner
+ *     The connection owner, or NULL if the connection currently has no owner.
+ *
+ * @param data
+ *     A pointer to a guac_terminal_text_output_open_params.
+ *
+ * @return
+ *     Always NULL.
+ */
+static void* guac_terminal_text_output_open_owner(guac_user* owner, void* data) {
+
+    guac_terminal_text_output_open_params* params =
+        (guac_terminal_text_output_open_params*) data;
+    guac_terminal* term = params->term;
+
+    /* Nothing to do if the connection has no owner to receive the stream */
+    if (owner == NULL)
+        return NULL;
+
+    guac_stream* stream = guac_user_alloc_stream(owner);
+
+    /* Open stream as a raw byte stream; it carries the remote PTY output
+     * verbatim (including ANSI/escape sequences). The mimetype is advisory:
+     * blob payloads are base64-encoded and thus binary-safe regardless. */
+    guac_protocol_send_pipe(owner->socket, stream,
+            "application/octet-stream", params->name);
+    guac_socket_flush(owner->socket);
+
+    term->text_output_stream = stream;
+    return NULL;
+
+}
+
+/**
+ * Guacamole user callback (guac_client_for_owner()) which writes any buffered
+ * text-output data to the connection owner's socket. If the owner has since
+ * left the connection, the (now invalid) user-level stream is abandoned.
+ *
+ * @param owner
+ *     The connection owner, or NULL if the connection currently has no owner.
+ *
+ * @param data
+ *     A pointer to the guac_terminal whose buffered text output should be sent.
+ *
+ * @return
+ *     Always NULL.
+ */
+static void* guac_terminal_text_output_flush_owner(guac_user* owner, void* data) {
+
+    guac_terminal* term = (guac_terminal*) data;
+
+    /* If the owner has left, its user-level streams have been freed; abandon
+     * the dangling stream rather than dereferencing it */
+    if (owner == NULL) {
+        term->text_output_stream = NULL;
+        term->text_output_length = 0;
+        return NULL;
+    }
+
+    if (term->text_output_stream != NULL && term->text_output_length > 0) {
+        guac_protocol_send_blob(owner->socket, term->text_output_stream,
+                term->text_output_buffer, term->text_output_length);
+        guac_socket_flush(owner->socket);
+        term->text_output_length = 0;
+    }
+
+    return NULL;
+
+}
+
+/**
+ * Guacamole user callback (guac_client_for_owner()) which flushes any remaining
+ * buffered text output, ends the text-output stream, and frees it. If the owner
+ * has already left, the stream is simply abandoned.
+ *
+ * @param owner
+ *     The connection owner, or NULL if the connection currently has no owner.
+ *
+ * @param data
+ *     A pointer to the guac_terminal whose text-output stream should be closed.
+ *
+ * @return
+ *     Always NULL.
+ */
+static void* guac_terminal_text_output_close_owner(guac_user* owner, void* data) {
+
+    guac_terminal* term = (guac_terminal*) data;
+
+    if (owner != NULL && term->text_output_stream != NULL) {
+
+        /* Flush remaining buffered data and write end of stream */
+        if (term->text_output_length > 0) {
+            guac_protocol_send_blob(owner->socket, term->text_output_stream,
+                    term->text_output_buffer, term->text_output_length);
+            term->text_output_length = 0;
+        }
+        guac_protocol_send_end(owner->socket, term->text_output_stream);
+        guac_socket_flush(owner->socket);
+
+        guac_user_free_stream(owner, term->text_output_stream);
+    }
+
+    term->text_output_stream = NULL;
+    return NULL;
+
+}
+
 void guac_terminal_text_output_open(guac_terminal* term, const char* name) {
 
     guac_client* client = term->client;
-    guac_socket* socket = client->socket;
 
     /* Close existing text-output stream, if any */
     guac_terminal_text_output_close(term);
 
     guac_terminal_lock(term);
 
-    /* Allocate and assign new text-output stream */
-    term->text_output_stream = guac_client_alloc_stream(client);
     term->text_output_length = 0;
 
-    /* Open stream as a raw byte stream; it carries the remote PTY output
-     * verbatim (including ANSI/escape sequences). The mimetype is advisory:
-     * blob payloads are base64-encoded and thus binary-safe regardless. */
-    guac_protocol_send_pipe(socket, term->text_output_stream,
-            "application/octet-stream", name);
+    /* Allocate and open the stream on the connection owner's socket, so raw
+     * output is delivered only to the owner (not broadcast to every user) and
+     * uses a user-level stream index able to receive "ack" instructions */
+    guac_terminal_text_output_open_params params = { term, name };
+    guac_client_for_owner(client, guac_terminal_text_output_open_owner, &params);
 
     guac_terminal_unlock(term);
 
@@ -3091,36 +3222,28 @@ void guac_terminal_text_output_write(guac_terminal* term,
 
 void guac_terminal_text_output_flush(guac_terminal* term) {
 
-    guac_client* client = term->client;
-    guac_socket* socket = client->socket;
-    guac_stream* stream = term->text_output_stream;
-
-    /* Write blob if data exists in buffer */
-    if (stream != NULL && term->text_output_length > 0) {
-        guac_protocol_send_blob(socket, stream,
-                term->text_output_buffer, term->text_output_length);
-        term->text_output_length = 0;
-    }
+    /* Send buffered data to the connection owner. The terminal lock is already
+     * held by the caller (guac_terminal_flush() or the buffer-full path of
+     * guac_terminal_text_output_write()). */
+    if (term->text_output_stream != NULL && term->text_output_length > 0)
+        guac_client_for_owner(term->client,
+                guac_terminal_text_output_flush_owner, term);
 
 }
 
 void guac_terminal_text_output_close(guac_terminal* term) {
 
     guac_client* client = term->client;
-    guac_socket* socket = client->socket;
 
     guac_terminal_lock(term);
 
     /* Close any existing text-output stream */
     if (term->text_output_stream != NULL) {
 
-        /* Flush remaining buffered data and write end of stream */
-        guac_terminal_text_output_flush(term);
-        guac_protocol_send_end(socket, term->text_output_stream);
-
-        /* Destroy stream */
-        guac_client_free_stream(client, term->text_output_stream);
-        term->text_output_stream = NULL;
+        /* Flush remaining buffered data, end and free the stream in the
+         * owner's context (or abandon it if the owner has left) */
+        guac_client_for_owner(client,
+                guac_terminal_text_output_close_owner, term);
 
         /* Log closure at debug level */
         guac_client_log(client, GUAC_LOG_DEBUG,
