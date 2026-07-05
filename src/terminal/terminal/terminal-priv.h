@@ -173,6 +173,18 @@ struct guac_terminal {
     int text_output_length;
 
     /**
+     * The number of text-output blobs which have been sent to the connection
+     * owner but not yet acknowledged via an "ack" instruction. This applies
+     * backpressure: when it reaches GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT,
+     * further buffered output is dropped rather than sent, bounding the memory
+     * and backlog devoted to a text-output consumer that has stalled. In tee
+     * mode the raw stream shares the protocol read loop with the graphical
+     * display, so output is dropped rather than blocked, to avoid stalling any
+     * co-attached browser user.
+     */
+    int text_output_inflight;
+
+    /**
      * The currently-active typescript recording all terminal output, or NULL
      * if no typescript is being used for the terminal session.
      */

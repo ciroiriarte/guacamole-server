@@ -2041,6 +2041,51 @@ void guac_terminal_pipe_stream_close(guac_terminal* term) {
 }
 
 /**
+ * The maximum number of text-output blobs that may be outstanding (sent to the
+ * connection owner but not yet acknowledged) before further buffered output is
+ * dropped. This bounds the backlog devoted to a stalled text-output consumer.
+ * At up to sizeof(text_output_buffer) bytes per blob, 16 outstanding blobs is
+ * on the order of 96 KB.
+ */
+#define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT 16
+
+/**
+ * Handler for "ack" instructions received on the text-output stream. Each
+ * acknowledged blob decrements the count of outstanding blobs, permitting
+ * further buffered output to be sent (see
+ * guac_terminal_text_output_flush_owner()).
+ *
+ * @param user
+ *     The user acknowledging the blob (the connection owner).
+ *
+ * @param stream
+ *     The text-output stream being acknowledged. Its data pointer references
+ *     the associated guac_terminal.
+ *
+ * @param error
+ *     An arbitrary, human-readable description of the status.
+ *
+ * @param status
+ *     The status code describing the acknowledged operation.
+ *
+ * @return
+ *     Always zero.
+ */
+static int guac_terminal_text_output_ack(guac_user* user, guac_stream* stream,
+        char* error, guac_protocol_status status) {
+
+    guac_terminal* term = (guac_terminal*) stream->data;
+
+    guac_terminal_lock(term);
+    if (term->text_output_inflight > 0)
+        term->text_output_inflight--;
+    guac_terminal_unlock(term);
+
+    return 0;
+
+}
+
+/**
  * Parameters for guac_terminal_text_output_open_owner(), passed through
  * guac_client_for_owner().
  */
@@ -2088,6 +2133,11 @@ static void* guac_terminal_text_output_open_owner(guac_user* owner, void* data) 
 
     guac_stream* stream = guac_user_alloc_stream(owner);
 
+    /* Route "ack" instructions for this stream back to the terminal so that
+     * outstanding blobs can be tracked for flow control */
+    stream->data = term;
+    stream->ack_handler = guac_terminal_text_output_ack;
+
     /* Open stream as a raw byte stream; it carries the remote PTY output
      * verbatim (including ANSI/escape sequences). The mimetype is advisory:
      * blob payloads are base64-encoded and thus binary-safe regardless. */
@@ -2127,10 +2177,26 @@ static void* guac_terminal_text_output_flush_owner(guac_user* owner, void* data)
     }
 
     if (term->text_output_stream != NULL && term->text_output_length > 0) {
+
+        /* Apply backpressure: if too many blobs are outstanding, the consumer
+         * is not keeping up. Drop this buffered output rather than sending it,
+         * bounding memory use. Output is dropped (not blocked) because in tee
+         * mode this raw stream shares the protocol read loop with the graphical
+         * display, and blocking the source would stall any browser user too. */
+        if (term->text_output_inflight >= GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT) {
+            guac_client_log(term->client, GUAC_LOG_DEBUG, "Dropping %i bytes of "
+                    "text-output: consumer is not keeping up (%i blobs "
+                    "outstanding).", term->text_output_length,
+                    term->text_output_inflight);
+            term->text_output_length = 0;
+            return NULL;
+        }
+
         guac_protocol_send_blob(owner->socket, term->text_output_stream,
                 term->text_output_buffer, term->text_output_length);
         guac_socket_flush(owner->socket);
         term->text_output_length = 0;
+        term->text_output_inflight++;
     }
 
     return NULL;
@@ -2184,6 +2250,7 @@ void guac_terminal_text_output_open(guac_terminal* term, const char* name) {
     guac_terminal_lock(term);
 
     term->text_output_length = 0;
+    term->text_output_inflight = 0;
 
     /* Allocate and open the stream on the connection owner's socket, so raw
      * output is delivered only to the owner (not broadcast to every user) and

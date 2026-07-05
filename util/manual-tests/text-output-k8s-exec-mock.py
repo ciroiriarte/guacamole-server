@@ -13,7 +13,7 @@ hostname=127.0.0.1 port=8091 namespace=default pod=testpod exec-command=/bin/sh.
 
 Requires the third-party "websockets" Python package.
 
-Usage: text-output-k8s-exec-mock.py [port]   (default 8091)
+Usage: text-output-k8s-exec-mock.py [port] [lines]   (defaults: 8091, 20)
 """
 import asyncio
 import sys
@@ -25,6 +25,7 @@ except ImportError as exc:  # pragma: no cover - manual dependency check
 
 SUBPROTO = "v4.channel.k8s.io"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
+LINES = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 
 
 def frame(text):
@@ -37,9 +38,9 @@ async def handler(ws, *args):
           % (getattr(ws, "subprotocol", None), getattr(ws, "path", "?")), flush=True)
     try:
         await ws.send(frame("\x1b[36mK8S-MOCK-EXEC ready\x1b[0m\r\n"))
-        for i in range(20):
+        for i in range(LINES):
             await ws.send(frame("\x1b[32mK8S-TEXT-OUTPUT line %02d\x1b[0m\r\n" % i))
-            await asyncio.sleep(0.2)
+            await asyncio.sleep(0.1)
     except Exception as exc:  # noqa: BLE001 - report and exit the handler
         print("[k8s-mock] handler ended: %r" % exc, flush=True)
 
