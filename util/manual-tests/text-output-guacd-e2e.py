@@ -21,7 +21,10 @@ Usage:
 Options:
     --secs N            How long to read the session stream (default 8).
     --expect SUBSTR     Require SUBSTR to appear in the captured raw bytes.
+    --expect-absent S   Require S to NOT appear (e.g. to show dropped output
+                        under backpressure when combined with --no-ack).
     --expect-no-pipe    Pass only if NO STDOUT pipe is opened (negative test).
+    --no-ack            Do not acknowledge blobs, to exercise flow control.
 
 Example:
     text-output-guacd-e2e.py ssh \\
@@ -92,15 +95,21 @@ def main():
     params = json.loads(sys.argv[2])
     secs = 8.0
     expect = None
+    expect_absent = None
     expect_no_pipe = False
+    no_ack = False
     a = sys.argv[3:]
     for j, v in enumerate(a):
         if v == "--secs":
             secs = float(a[j + 1])
         elif v == "--expect":
             expect = a[j + 1]
+        elif v == "--expect-absent":
+            expect_absent = a[j + 1]
         elif v == "--expect-no-pipe":
             expect_no_pipe = True
+        elif v == "--no-ack":
+            no_ack = True
 
     s = socket.create_connection((HOST, PORT), timeout=10)
     s.sendall(enc("select", proto).encode())
@@ -165,6 +174,10 @@ def main():
                     stdout_idx, pipe_seen = idx, True
             elif op == "blob" and stdout_idx is not None and inst[1].decode() == stdout_idx:
                 captured += base64.b64decode(inst[2])
+                # Acknowledge the blob so guacd's flow control lets more
+                # through (unless deliberately withheld to test backpressure).
+                if not no_ack:
+                    s.sendall(enc("ack", stdout_idx, "", "0").encode())
             elif op == "error":
                 print("[error] %s" % b",".join(inst[1:]).decode(errors="replace"))
             elif op == "disconnect":
@@ -188,6 +201,10 @@ def main():
             found = expect.encode() in captured
             print("expect %r        : %s" % (expect, found))
             ok = ok and found
+        if expect_absent is not None:
+            absent = expect_absent.encode() not in captured
+            print("expect absent %r : %s" % (expect_absent, absent))
+            ok = ok and absent
     print("VERDICT            : %s" % ("PASS" if ok else "FAIL"))
     sys.exit(0 if ok else 1)
 
