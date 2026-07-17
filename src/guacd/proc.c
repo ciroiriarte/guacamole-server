@@ -77,6 +77,33 @@ typedef struct guacd_user_thread_params {
  * @return
  *     Always NULL.
  */
+/**
+ * Returns the number of seconds that a connection's underlying process should
+ * be retained after its last user disconnects, allowing a briefly-disconnected
+ * client to reconnect and resume the same session. The value is read once from
+ * the GUACD_RESUME_GRACE environment variable; if unset or invalid, session
+ * resume is disabled (0), preserving the historical behavior of tearing the
+ * connection down immediately once the last user leaves.
+ *
+ * @return
+ *     The resume grace period, in seconds, or 0 if session resume is disabled.
+ */
+static int guacd_resume_grace_seconds() {
+
+    static int grace_seconds = -1;
+
+    /* Read and cache the configured grace period on first use */
+    if (grace_seconds < 0) {
+        const char* value = getenv("GUACD_RESUME_GRACE");
+        grace_seconds = (value != NULL) ? atoi(value) : 0;
+        if (grace_seconds < 0)
+            grace_seconds = 0;
+    }
+
+    return grace_seconds;
+
+}
+
 static void* guacd_user_thread(void* data) {
 
     /* Thread name user-conn: manages a single user's connection lifecycle
@@ -103,8 +130,41 @@ static void* guacd_user_thread(void* data) {
 
     /* Stop client and prevent future users if all users are disconnected */
     if (client->connected_users == 0) {
-        guacd_log(GUAC_LOG_INFO, "Last user of connection \"%s\" disconnected", client->connection_id);
-        guacd_proc_stop(proc);
+
+        /* Optionally retain the connection for a bounded grace period so a
+         * briefly-disconnected client can reconnect and resume this same
+         * session. During the grace period the process remains registered and
+         * rejoinable by its connection ID; the connection is torn down
+         * immediately if resume is disabled or if no user reconnects before
+         * the grace period elapses. */
+        int grace_seconds = guacd_resume_grace_seconds();
+        if (grace_seconds > 0) {
+
+            guacd_log(GUAC_LOG_INFO, "Last user of connection \"%s\" "
+                    "disconnected; holding for up to %i second(s) for "
+                    "reconnect", client->connection_id, grace_seconds);
+
+            /* Wait for a reconnecting user or for the grace period to elapse,
+             * polling periodically as connected_users is updated by users
+             * joining and leaving */
+            int elapsed_ms = 0;
+            int grace_ms = grace_seconds * 1000;
+            while (elapsed_ms < grace_ms && client->connected_users == 0) {
+                usleep(250000);
+                elapsed_ms += 250;
+            }
+
+        }
+
+        /* Tear down only if still no users after any grace period */
+        if (client->connected_users == 0) {
+            guacd_log(GUAC_LOG_INFO, "Last user of connection \"%s\" disconnected", client->connection_id);
+            guacd_proc_stop(proc);
+        }
+        else
+            guacd_log(GUAC_LOG_INFO, "Connection \"%s\" resumed by a "
+                    "reconnecting client", client->connection_id);
+
     }
 
     /* Clean up */
