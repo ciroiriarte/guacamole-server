@@ -321,15 +321,14 @@ void* guac_kubernetes_client_thread(void* data) {
      * in addition to the normal graphical display. As text-output is
      * effectively a copy/exfiltration channel, it is gated behind
      * disable-copy. */
-    if (settings->text_output) {
-        if (settings->disable_copy)
-            guac_client_log(client, GUAC_LOG_WARNING, "\"text-output\" was "
-                    "requested but is being ignored because copying from the "
-                    "terminal is disabled (\"disable-copy\").");
-        else
-            guac_terminal_text_output_open(kubernetes_client->term, "STDOUT",
-                    settings->text_output_raw);
-    }
+    if (guac_terminal_text_output_should_open(settings->text_output,
+                settings->disable_copy))
+        guac_terminal_text_output_open(kubernetes_client->term, "STDOUT",
+                settings->text_output_raw);
+    else if (settings->text_output)
+        guac_client_log(client, GUAC_LOG_WARNING, "\"text-output\" was "
+                "requested but is being ignored because copying from the "
+                "terminal is disabled (\"disable-copy\").");
 
     /* Init libwebsockets context creation parameters */
     struct lws_context_creation_info context_info = {

@@ -1046,6 +1046,22 @@ void guac_terminal_text_output_open(guac_terminal* term, const char* name,
         int flush_immediately);
 
 /**
+ * Returns whether a text-output stream should be opened under the given
+ * terminal policy settings. Text-output is a machine-readable copy channel and
+ * must not be opened when copying from the terminal is disabled.
+ *
+ * @param text_output
+ *     Whether text-output was requested for the connection.
+ *
+ * @param disable_copy
+ *     Whether copying from the terminal has been disabled.
+ *
+ * @return
+ *     Non-zero if text-output should be opened, zero otherwise.
+ */
+int guac_terminal_text_output_should_open(int text_output, int disable_copy);
+
+/**
  * Writes a block of raw bytes to the text-output pipe stream currently open
  * and associated with the given terminal. The text-output stream must already
  * have been opened via guac_terminal_text_output_open(). If no text-output

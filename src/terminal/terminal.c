@@ -3022,15 +3022,6 @@ void guac_terminal_pipe_stream_close(guac_terminal* term) {
 }
 
 /**
- * The maximum number of text-output blobs that may be outstanding (sent to the
- * connection owner but not yet acknowledged) before further buffered output is
- * dropped. This bounds the backlog devoted to a stalled text-output consumer.
- * At up to sizeof(text_output_buffer) bytes per blob, 16 outstanding blobs is
- * on the order of 96 KB.
- */
-#define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT 16
-
-/**
  * Handler for "ack" instructions received on the text-output stream. Each
  * acknowledged blob decrements the count of outstanding blobs, permitting
  * further buffered output to be sent (see
@@ -3226,6 +3217,10 @@ static void* guac_terminal_text_output_close_owner(guac_user* owner, void* data)
     term->text_output_stream = NULL;
     return NULL;
 
+}
+
+int guac_terminal_text_output_should_open(int text_output, int disable_copy) {
+    return text_output && !disable_copy;
 }
 
 void guac_terminal_text_output_open(guac_terminal* term, const char* name,

@@ -38,6 +38,13 @@
 #define GUAC_TERMINAL_MODIFIED 1
 
 /**
+ * The maximum number of text-output blobs that may be outstanding (sent to the
+ * connection owner but not yet acknowledged) before further buffered output is
+ * dropped or, in raw/headless mode, the connection is aborted.
+ */
+#define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT 16
+
+/**
  * Handler for characters printed to the terminal. When a character is printed,
  * the current char handler for the terminal is called and given that
  * character.
