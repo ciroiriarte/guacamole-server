@@ -125,8 +125,26 @@ static void* guacd_user_thread(void* data) {
     user->client = client;
     user->owner  = params->owner;
 
-    /* Handle user connection from handshake until disconnect/completion */
-    guac_user_handle_connection(user, GUACD_USEC_TIMEOUT);
+    /* Handle user connection from handshake until disconnect/completion. Do not
+     * time out an inactive user faster than the session would be held open for
+     * resume: when a resume grace period is configured, tolerate user silence
+     * for at least that long so a user whose link briefly drops is not aborted
+     * by guacd (with CLIENT_TIMEOUT) before they can reconnect and resume. This
+     * closes the case where the client's transport recovers on its own but
+     * guacd had already dropped the user. With resume disabled (grace 0) this is
+     * exactly the default input timeout. */
+    int input_timeout = GUACD_USEC_TIMEOUT;
+    int grace_seconds = guacd_resume_grace_seconds();
+    if (grace_seconds > GUACD_TIMEOUT / 1000) {
+
+        /* Bound the value so the microsecond conversion stays within int range */
+        if (grace_seconds > 2000)
+            grace_seconds = 2000;
+
+        input_timeout = grace_seconds * 1000000;
+
+    }
+    guac_user_handle_connection(user, input_timeout);
 
     /* Stop client and prevent future users if all users are disconnected */
     if (client->connected_users == 0) {
