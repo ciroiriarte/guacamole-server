@@ -507,7 +507,6 @@ guac_kubernetes_settings* guac_kubernetes_parse_args(guac_user* user,
     settings->terminal_type =
         guac_user_parse_args_string(user, GUAC_KUBERNETES_CLIENT_ARGS, argv,
                 IDX_TERMINAL_TYPE, "linux");
-    /* Parse raw text-output mode flag */
     /* Parse text-output mode. Accepts "true" (tee mode: the graphical display
      * is preserved for browser clients) or "raw" (headless: the graphical
      * terminal is not rendered, eliminating the graphical instruction stream

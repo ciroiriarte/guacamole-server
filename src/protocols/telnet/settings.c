@@ -597,7 +597,6 @@ guac_telnet_settings* guac_telnet_parse_args(guac_user* user,
         guac_user_parse_args_boolean(user, GUAC_TELNET_CLIENT_ARGS, argv,
                 IDX_DISABLE_PASTE, false);
 
-    /* Parse raw text-output mode flag */
     /* Parse text-output mode. Accepts "true" (tee mode: the graphical display
      * is preserved for browser clients) or "raw" (headless: the graphical
      * terminal is not rendered, eliminating the graphical instruction stream

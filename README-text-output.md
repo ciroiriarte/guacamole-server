@@ -50,6 +50,30 @@ honors the existing copy restriction used by terminal protocols:
 * If copy/clipboard output is allowed and `text-output=true`, guacd opens the
   `STDOUT` pipe and writes raw terminal bytes to it.
 
+Flow control and backpressure
+-----------------------------
+
+Clients must send an `ack` instruction for every `blob` received on the `STDOUT`
+pipe, and should do so on receipt rather than after rendering — acking only after
+a blocking write to a local terminal lets a slow consumer stall its own ack
+stream.
+
+guacd bounds the unacknowledged backlog at 256 KB, and at no more than 256
+outstanding blobs. The byte bound is the operative one: in raw mode every PTY
+read is flushed as its own blob, so blobs are frequently only a few bytes and a
+blob-count bound alone would be reached after a trivial amount of output.
+
+What happens on overrun depends on the mode, and the difference is deliberate:
+
+* In tee mode, buffered output is **dropped** and the session continues. The tee
+  shares the protocol read loop with the graphical display, so blocking on a
+  stalled text consumer would also stall any co-attached browser user. Delivery
+  is therefore best-effort, and a dropped chunk is logged as a warning.
+* In raw mode, the connection is **aborted** with `SERVER_ERROR` and the message
+  `text-output consumer is not keeping up`. The pipe is the session's only output
+  and is byte-oriented, so failing fast is preferable to handing the client a
+  silently-truncated stream.
+
 Manual tunnel smoke test
 ------------------------
 
