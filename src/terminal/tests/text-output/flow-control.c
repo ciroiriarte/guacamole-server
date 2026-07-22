@@ -31,6 +31,7 @@
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -387,6 +388,35 @@ void test_text_output__raw_mode_throttles_rather_than_aborting(void) {
     CU_ASSERT_PTR_NOT_NULL(strstr(instructions, "4.blob"));
 
     guac_mem_free(instructions);
+    text_output_fixture_free(fixture);
+
+}
+
+/**
+ * Regression test: a raw-mode writer waiting for window space must stop waiting
+ * as soon as the connection is going away. Only an ACK signals that condition,
+ * and a disconnected client never sends one, so a writer which ignored client
+ * state would hold teardown up until the give-up deadline expired.
+ */
+void test_text_output__raw_mode_stops_waiting_once_disconnected(void) {
+
+    text_output_fixture* fixture = text_output_fixture_alloc();
+
+    guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+
+    /* A generous give-up deadline: the test must not depend on reaching it */
+    fixture->term->text_output_stall_timeout = 30;
+    fixture->term->text_output_inflight = GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT;
+
+    /* The connection is being torn down; no further ACK can arrive */
+    fixture->client->state = GUAC_CLIENT_STOPPING;
+
+    time_t started = time(NULL);
+    guac_terminal_text_output_write(fixture->term, "gone", 4);
+    time_t elapsed = time(NULL) - started;
+
+    CU_ASSERT_TRUE(elapsed < 5);
+
     text_output_fixture_free(fixture);
 
 }

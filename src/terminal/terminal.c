@@ -3294,11 +3294,33 @@ static void guac_terminal_text_output_await_window(guac_terminal* term) {
                 || term->text_output_inflight_bytes + term->text_output_length
                         > GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES)) {
 
+        /* Stop waiting once the connection is going away. Only an "ack" signals
+         * this condition, and a client which has disconnected will never send
+         * one, so without this check teardown would stall until the give-up
+         * deadline expired. */
+        if (term->client->state != GUAC_CLIENT_RUNNING)
+            return;
+
+        struct timespec now;
+        clock_gettime(CLOCK_REALTIME, &now);
+
         /* Give up if the consumer has stopped acking entirely. The flush which
          * follows will then find the window still full and abort. */
-        if (pthread_cond_timedwait(&term->text_output_acked, &term->lock,
-                    &deadline) == ETIMEDOUT)
+        if (now.tv_sec > deadline.tv_sec
+                || (now.tv_sec == deadline.tv_sec
+                    && now.tv_nsec >= deadline.tv_nsec))
             return;
+
+        /* Wake at least once a second so that a disconnect is noticed promptly
+         * rather than only when the consumer acks or the deadline expires */
+        struct timespec wake = now;
+        wake.tv_sec += 1;
+        if (wake.tv_sec > deadline.tv_sec
+                || (wake.tv_sec == deadline.tv_sec
+                    && wake.tv_nsec > deadline.tv_nsec))
+            wake = deadline;
+
+        pthread_cond_timedwait(&term->text_output_acked, &term->lock, &wake);
 
     }
 
