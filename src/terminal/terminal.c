@@ -3049,8 +3049,22 @@ static int guac_terminal_text_output_ack(guac_user* user, guac_stream* stream,
     guac_terminal* term = (guac_terminal*) stream->data;
 
     guac_terminal_lock(term);
-    if (term->text_output_inflight > 0)
+
+    /* Retire the oldest outstanding blob, reducing the outstanding byte count
+     * by that blob's size. Blobs are acknowledged in the order sent. */
+    if (term->text_output_inflight > 0) {
+
+        term->text_output_inflight_bytes -=
+                term->text_output_inflight_sizes[term->text_output_inflight_head];
+
+        term->text_output_inflight_head =
+                (term->text_output_inflight_head + 1)
+                        % GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT;
+
         term->text_output_inflight--;
+
+    }
+
     guac_terminal_unlock(term);
 
     return 0;
@@ -3150,12 +3164,18 @@ static void* guac_terminal_text_output_flush_owner(guac_user* owner, void* data)
 
     if (term->text_output_stream != NULL && term->text_output_length > 0) {
 
-        /* Apply backpressure: if too many blobs are outstanding, the consumer
-         * is not keeping up. Tee mode remains best-effort and drops buffered
-         * raw output rather than stalling browser users that share the same
-         * protocol read loop. Raw/headless mode is CLI-facing and byte-oriented;
-         * fail fast instead of silently corrupting the stream. */
-        if (term->text_output_inflight >= GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT) {
+        /* Apply backpressure: if too much output is outstanding, the consumer
+         * is not keeping up. The backlog is bounded by bytes rather than by
+         * blob count alone, since raw mode flushes every write as its own blob
+         * and those blobs may be only a few bytes each. Tee mode remains
+         * best-effort and drops buffered raw output rather than stalling browser
+         * users that share the same protocol read loop. Raw/headless mode is
+         * CLI-facing and byte-oriented; fail fast instead of silently
+         * corrupting the stream. */
+        if (term->text_output_inflight >= GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT
+                || term->text_output_inflight_bytes + term->text_output_length
+                        > GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES) {
+
             if (term->text_output_flush_immediately) {
                 guac_client_abort(term->client, GUAC_PROTOCOL_STATUS_SERVER_ERROR,
                         "text-output consumer is not keeping up");
@@ -3164,9 +3184,9 @@ static void* guac_terminal_text_output_flush_owner(guac_user* owner, void* data)
             }
 
             guac_client_log(term->client, GUAC_LOG_WARNING, "Dropping %i bytes of "
-                    "text-output: consumer is not keeping up (%i blobs "
-                    "outstanding).", term->text_output_length,
-                    term->text_output_inflight);
+                    "text-output: consumer is not keeping up (%i blobs / %i "
+                    "bytes outstanding).", term->text_output_length,
+                    term->text_output_inflight, term->text_output_inflight_bytes);
             term->text_output_length = 0;
             return NULL;
         }
@@ -3174,6 +3194,15 @@ static void* guac_terminal_text_output_flush_owner(guac_user* owner, void* data)
         guac_protocol_send_blob(owner->socket, term->text_output_stream,
                 term->text_output_buffer, term->text_output_length);
         guac_socket_flush(owner->socket);
+
+        /* Record the size of the newly-outstanding blob so that the byte count
+         * can be reduced by the same amount when it is acknowledged */
+        term->text_output_inflight_sizes[
+                (term->text_output_inflight_head + term->text_output_inflight)
+                        % GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT] =
+                term->text_output_length;
+
+        term->text_output_inflight_bytes += term->text_output_length;
         term->text_output_length = 0;
         term->text_output_inflight++;
     }
@@ -3235,6 +3264,8 @@ void guac_terminal_text_output_open(guac_terminal* term, const char* name,
 
     term->text_output_length = 0;
     term->text_output_inflight = 0;
+    term->text_output_inflight_bytes = 0;
+    term->text_output_inflight_head = 0;
     term->text_output_flush_immediately = flush_immediately;
 
     /* Allocate and open the stream on the connection owner's socket, so raw

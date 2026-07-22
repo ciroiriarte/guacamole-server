@@ -210,6 +210,124 @@ void test_text_output__tee_mode_drops_when_consumer_stalls(void) {
 
 }
 
+/**
+ * Regression test: the outstanding-output bound must be expressed in bytes, not
+ * merely in blob count. Raw mode flushes every write as its own blob, so a
+ * client which is acking perfectly normally still accumulates many small
+ * outstanding blobs; a blob-count-only bound would abort a healthy session after
+ * a trivial amount of interactive output.
+ */
+void test_text_output__many_tiny_blobs_do_not_trip_backpressure(void) {
+
+    text_output_fixture* fixture = text_output_fixture_alloc();
+
+    guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+
+    /* Emit far more blobs than a naive count-based window would tolerate,
+     * without acking any of them. The total volume remains tiny. */
+    for (int i = 0; i < 200; i++)
+        guac_terminal_text_output_write(fixture->term, "x", 1);
+
+    CU_ASSERT_EQUAL(fixture->client->state, GUAC_CLIENT_RUNNING);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight, 200);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight_bytes, 200);
+
+    text_output_fixture_free(fixture);
+
+}
+
+/**
+ * Verifies that each ACK retires the oldest outstanding blob and reduces the
+ * outstanding byte count by exactly that blob's size, rather than by a fixed
+ * amount.
+ */
+void test_text_output__ack_retires_oldest_blob_bytes(void) {
+
+    text_output_fixture* fixture = text_output_fixture_alloc();
+
+    guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+
+    guac_terminal_text_output_write(fixture->term, "abc", 3);
+    guac_terminal_text_output_write(fixture->term, "defgh", 5);
+
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight, 2);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight_bytes, 8);
+
+    guac_stream* stream = fixture->term->text_output_stream;
+
+    /* Acking retires the oldest blob (3 bytes), not the newest */
+    stream->ack_handler(fixture->owner, stream, "OK",
+            GUAC_PROTOCOL_STATUS_SUCCESS);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight, 1);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight_bytes, 5);
+
+    stream->ack_handler(fixture->owner, stream, "OK",
+            GUAC_PROTOCOL_STATUS_SUCCESS);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight, 0);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight_bytes, 0);
+
+    /* A surplus ACK must not drive the counters negative */
+    stream->ack_handler(fixture->owner, stream, "OK",
+            GUAC_PROTOCOL_STATUS_SUCCESS);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight, 0);
+    CU_ASSERT_EQUAL(fixture->term->text_output_inflight_bytes, 0);
+
+    text_output_fixture_free(fixture);
+
+}
+
+/**
+ * Verifies that the byte bound, rather than the blob count, is what ultimately
+ * stops a stalled raw-mode consumer.
+ */
+void test_text_output__byte_bound_aborts_raw_mode(void) {
+
+    text_output_fixture* fixture = text_output_fixture_alloc();
+
+    guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+
+    /* Simulate a large outstanding backlog well within the blob-count limit.
+     * Set directly rather than written, as actually sending this volume would
+     * fill the test pipe. */
+    fixture->term->text_output_inflight = 1;
+    fixture->term->text_output_inflight_bytes =
+            GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES;
+
+    guac_terminal_text_output_write(fixture->term, "over", 4);
+
+    CU_ASSERT_EQUAL(fixture->client->state, GUAC_CLIENT_STOPPING);
+    CU_ASSERT_EQUAL(fixture->term->text_output_length, 0);
+    CU_ASSERT_EQUAL(fixture->last_log_level, GUAC_LOG_ERROR);
+
+    text_output_fixture_free(fixture);
+
+}
+
+/**
+ * Verifies that closing the text-output stream releases it such that a late ACK
+ * arriving afterwards is rejected before dispatch, rather than reaching the
+ * terminal's ACK handler with a stale data pointer.
+ */
+void test_text_output__close_marks_stream_unroutable(void) {
+
+    text_output_fixture* fixture = text_output_fixture_alloc();
+
+    guac_terminal_text_output_open(fixture->term, "STDOUT", 0);
+
+    guac_stream* stream = fixture->term->text_output_stream;
+    CU_ASSERT_PTR_NOT_NULL_FATAL(stream);
+
+    guac_terminal_text_output_close(fixture->term);
+
+    /* The terminal must no longer reference the stream, and the stream must be
+     * marked closed so that __guac_handle_ack() drops any late ACK for it */
+    CU_ASSERT_PTR_NULL(fixture->term->text_output_stream);
+    CU_ASSERT_EQUAL(stream->index, GUAC_USER_CLOSED_STREAM_INDEX);
+
+    text_output_fixture_free(fixture);
+
+}
+
 void test_text_output__raw_mode_aborts_when_consumer_stalls(void) {
 
     text_output_fixture* fixture = text_output_fixture_alloc();

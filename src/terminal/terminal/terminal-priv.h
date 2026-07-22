@@ -41,8 +41,25 @@
  * The maximum number of text-output blobs that may be outstanding (sent to the
  * connection owner but not yet acknowledged) before further buffered output is
  * dropped or, in raw/headless mode, the connection is aborted.
+ *
+ * This bounds the number of blobs tracked, not the volume of data: in raw
+ * (headless) mode every write is flushed as its own blob, so blobs may be only
+ * a few bytes each and this limit alone would be reached after a trivial amount
+ * of output. GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES bounds the actual
+ * backlog; this value need only be generous enough that a consumer acking at a
+ * sane rate never reaches it.
  */
-#define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT 16
+#define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT 256
+
+/**
+ * The maximum number of bytes of text-output which may be outstanding (sent to
+ * the connection owner but not yet acknowledged) before further buffered output
+ * is dropped or, in raw/headless mode, the connection is aborted. This is the
+ * meaningful bound on the backlog devoted to a stalled consumer, and is
+ * expressed in bytes so that it is unaffected by how the output happens to be
+ * split into blobs.
+ */
+#define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES (256 * 1024)
 
 /**
  * Handler for characters printed to the terminal. When a character is printed,
@@ -182,15 +199,45 @@ struct guac_terminal {
 
     /**
      * The number of text-output blobs which have been sent to the connection
-     * owner but not yet acknowledged via an "ack" instruction. This applies
-     * backpressure: when it reaches GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT,
-     * further buffered output is dropped rather than sent, bounding the memory
-     * and backlog devoted to a text-output consumer that has stalled. In tee
-     * mode the raw stream shares the protocol read loop with the graphical
-     * display, so output is dropped rather than blocked, to avoid stalling any
-     * co-attached browser user.
+     * owner but not yet acknowledged via an "ack" instruction. Together with
+     * text_output_inflight_bytes this applies backpressure: when either this
+     * reaches GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT or the outstanding byte
+     * count would exceed GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES, the
+     * consumer is considered stalled.
+     *
+     * The response to a stalled consumer differs by mode. In tee mode the raw
+     * stream shares the protocol read loop with the graphical display, so
+     * buffered output is dropped rather than blocked, to avoid stalling any
+     * co-attached browser user; the session continues. In raw (headless) mode
+     * the stream is the session's only output and is byte-oriented, so the
+     * connection is aborted rather than silently delivering a corrupted stream.
      */
     int text_output_inflight;
+
+    /**
+     * The total number of bytes of text-output which have been sent to the
+     * connection owner but not yet acknowledged. Maintained alongside
+     * text_output_inflight_sizes, which records the size of each outstanding
+     * blob so that this count can be reduced by the correct amount as each
+     * "ack" arrives.
+     */
+    int text_output_inflight_bytes;
+
+    /**
+     * Circular buffer recording the size, in bytes, of each text-output blob
+     * which has been sent but not yet acknowledged. The oldest outstanding blob
+     * is at index text_output_inflight_head, and text_output_inflight entries
+     * are valid starting from there. Blobs on a single stream are acknowledged
+     * in the order they were sent, so treating this as a FIFO correctly
+     * attributes each "ack" to the blob it acknowledges.
+     */
+    int text_output_inflight_sizes[GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT];
+
+    /**
+     * The index within text_output_inflight_sizes of the oldest outstanding
+     * text-output blob.
+     */
+    int text_output_inflight_head;
 
     /**
      * Whether buffered text-output should be flushed immediately as it is
