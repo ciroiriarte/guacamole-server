@@ -13,7 +13,7 @@ hostname=127.0.0.1 port=8091 namespace=default pod=testpod exec-command=/bin/sh.
 
 Requires the third-party "websockets" Python package.
 
-Usage: text-output-k8s-exec-mock.py [port] [lines]   (defaults: 8091, 20)
+Usage: text-output-k8s-exec-mock.py [port] [lines] [pad]  (defaults: 8091, 20, 0)
 """
 import asyncio
 import sys
@@ -27,6 +27,11 @@ SUBPROTO = "v4.channel.k8s.io"
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8091
 LINES = int(sys.argv[2]) if len(sys.argv) > 2 else 20
 
+# Optional per-line padding, in bytes. Used to push a modest number of lines
+# past guacd's unacknowledged-backlog byte bound without needing a line count
+# so large that the per-line delay dominates the test's runtime.
+PAD = int(sys.argv[3]) if len(sys.argv) > 3 else 0
+
 
 def frame(text):
     """Wrap text as a Kubernetes exec stdout (channel 1) binary frame."""
@@ -39,7 +44,8 @@ async def handler(ws, *args):
     try:
         await ws.send(frame("\x1b[36mK8S-MOCK-EXEC ready\x1b[0m\r\n"))
         for i in range(LINES):
-            await ws.send(frame("\x1b[32mK8S-TEXT-OUTPUT line %02d\x1b[0m\r\n" % i))
+            await ws.send(frame("\x1b[32mK8S-TEXT-OUTPUT line %02d\x1b[0m%s\r\n"
+                                % (i, "P" * PAD)))
             await asyncio.sleep(0.1)
     except Exception as exc:  # noqa: BLE001 - report and exit the handler
         print("[k8s-mock] handler ended: %r" % exc, flush=True)

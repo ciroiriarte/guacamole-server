@@ -106,24 +106,40 @@ check $?
 pkill -f "$MOCK" 2>/dev/null
 
 # =========================== FLOW CONTROL ===========================
-# Flood 60 lines (well past the server's outstanding-blob threshold). With
-# acks, everything is delivered; without acks, guacd drops the backlog.
+# guacd bounds the unacknowledged backlog by BYTES (256 KB), not by blob count,
+# so a burst only overflows once its volume exceeds that bound. Each line here
+# is padded to 4 KB so that 100 lines (~400 KB) comfortably overruns it while
+# the blob count stays well inside its own limit -- this exercises the byte
+# bound specifically. With acks, the window keeps draining and everything is
+# delivered; without acks, guacd drops the backlog once it overflows.
 
-hr "FLOW CONTROL: 60-line flood WITH acks -> all lines delivered (line 59 present)"
+FLOOD_LINES=100
+FLOOD_PAD=4096
+
+hr "FLOW CONTROL: ~400KB flood WITH acks -> all lines delivered (line 99 present)"
 pkill -f "$MOCK" 2>/dev/null; sleep 0.3
-python3 "$MOCK" "$K8S_PORT" 60 >"$TMP/k8s.log" 2>&1 & sleep 1
+python3 "$MOCK" "$K8S_PORT" "$FLOOD_LINES" "$FLOOD_PAD" >"$TMP/k8s.log" 2>&1 & sleep 1
 python3 "$DRIVER" kubernetes \
   "{\"hostname\":\"127.0.0.1\",\"port\":\"$K8S_PORT\",\"use-ssl\":\"false\",\"namespace\":\"default\",\"pod\":\"testpod\",\"exec-command\":\"/bin/sh\",\"text-output\":\"true\"}" \
-  --secs 12 --expect "K8S-TEXT-OUTPUT line 59"
+  --secs 30 --expect "K8S-TEXT-OUTPUT line 99"
 check $?
 pkill -f "$MOCK" 2>/dev/null
 
-hr "FLOW CONTROL: 60-line flood WITHOUT acks -> backlog dropped (line 00 present, line 59 absent)"
+hr "FLOW CONTROL: ~400KB flood WITHOUT acks -> backlog dropped (line 00 present, line 99 absent)"
+pkill -f "$MOCK" 2>/dev/null; sleep 0.3
+python3 "$MOCK" "$K8S_PORT" "$FLOOD_LINES" "$FLOOD_PAD" >"$TMP/k8s.log" 2>&1 & sleep 1
+python3 "$DRIVER" kubernetes \
+  "{\"hostname\":\"127.0.0.1\",\"port\":\"$K8S_PORT\",\"use-ssl\":\"false\",\"namespace\":\"default\",\"pod\":\"testpod\",\"exec-command\":\"/bin/sh\",\"text-output\":\"true\"}" \
+  --secs 30 --no-ack --expect "K8S-TEXT-OUTPUT line 00" --expect-absent "K8S-TEXT-OUTPUT line 99"
+check $?
+pkill -f "$MOCK" 2>/dev/null
+
+hr "FLOW CONTROL: small unacked burst is NOT dropped (byte bound, not blob count)"
 pkill -f "$MOCK" 2>/dev/null; sleep 0.3
 python3 "$MOCK" "$K8S_PORT" 60 >"$TMP/k8s.log" 2>&1 & sleep 1
 python3 "$DRIVER" kubernetes \
   "{\"hostname\":\"127.0.0.1\",\"port\":\"$K8S_PORT\",\"use-ssl\":\"false\",\"namespace\":\"default\",\"pod\":\"testpod\",\"exec-command\":\"/bin/sh\",\"text-output\":\"true\"}" \
-  --secs 12 --no-ack --expect "K8S-TEXT-OUTPUT line 00" --expect-absent "K8S-TEXT-OUTPUT line 59"
+  --secs 15 --no-ack --expect "K8S-TEXT-OUTPUT line 59"
 check $?
 pkill -f "$MOCK" 2>/dev/null
 
