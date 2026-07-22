@@ -25,10 +25,12 @@ connection owner's user socket so client `ack` instructions route back to the
 stream handler. Clients must `ack` every received `blob`, on receipt rather than
 after rendering. guacd bounds the unacknowledged backlog at 256 KB (and at most
 256 outstanding blobs); the byte bound is the operative one, since raw mode emits
-one blob per PTY read. On overrun, tee mode drops further buffered output rather
-than blocking the PTY/read loop and stalling co-attached browser users, while raw
-mode aborts the connection with `SERVER_ERROR` rather than delivering a silently
-corrupted byte stream.
+one blob per PTY read. When the window fills, tee mode drops further buffered
+output rather than blocking the PTY/read loop and stalling co-attached browser
+users, while raw mode throttles the read loop until the consumer catches up,
+propagating backpressure to the remote program through the PTY. A raw-mode
+consumer that stops acking entirely for 15 seconds is disconnected with
+`SERVER_ERROR`.
 
 `disable-copy` is honored, and raw pipe contents are not logged or recorded by
 default.
