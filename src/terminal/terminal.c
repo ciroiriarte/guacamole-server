@@ -3160,12 +3160,19 @@ static void* guac_terminal_text_output_flush_owner(guac_user* owner, void* data)
     if (term->text_output_stream != NULL && term->text_output_length > 0) {
 
         /* Apply backpressure: if too many blobs are outstanding, the consumer
-         * is not keeping up. Drop this buffered output rather than sending it,
-         * bounding memory use. Output is dropped (not blocked) because in tee
-         * mode this raw stream shares the protocol read loop with the graphical
-         * display, and blocking the source would stall any browser user too. */
+         * is not keeping up. Tee mode remains best-effort and drops buffered
+         * raw output rather than stalling browser users that share the same
+         * protocol read loop. Raw/headless mode is CLI-facing and byte-oriented;
+         * fail fast instead of silently corrupting the stream. */
         if (term->text_output_inflight >= GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT) {
-            guac_client_log(term->client, GUAC_LOG_DEBUG, "Dropping %i bytes of "
+            if (term->text_output_flush_immediately) {
+                guac_client_abort(term->client, GUAC_PROTOCOL_STATUS_SERVER_ERROR,
+                        "text-output consumer is not keeping up");
+                term->text_output_length = 0;
+                return NULL;
+            }
+
+            guac_client_log(term->client, GUAC_LOG_WARNING, "Dropping %i bytes of "
                     "text-output: consumer is not keeping up (%i blobs "
                     "outstanding).", term->text_output_length,
                     term->text_output_inflight);
@@ -3252,14 +3259,11 @@ void guac_terminal_text_output_open(guac_terminal* term, const char* name,
 void guac_terminal_text_output_write(guac_terminal* term,
         const char* buffer, int length) {
 
-    /* Ignore if no text-output stream is open (fast path, re-checked under
-     * lock below) */
-    if (term->text_output_stream == NULL)
-        return;
-
     guac_terminal_lock(term);
 
-    /* Append data only if the stream is still open */
+    /* Append data only if the stream is open. This check must happen under the
+     * terminal lock: owner-disconnect and close paths mutate text_output_stream
+     * while holding the same lock. */
     if (term->text_output_stream != NULL) {
 
         while (length > 0) {
