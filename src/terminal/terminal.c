@@ -35,6 +35,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -617,6 +618,9 @@ guac_terminal* guac_terminal_create(guac_client* client,
     /* Init terminal lock */
     pthread_mutex_init(&(term->lock), NULL);
 
+    /* Init condition signalling that outstanding text-output has been acked */
+    pthread_cond_init(&(term->text_output_acked), NULL);
+
     /* Repaint and resize overall display */
     guac_terminal_repaint_default_layer(term, term->client->socket);
     guac_terminal_display_resize(term->display,
@@ -728,6 +732,7 @@ void guac_terminal_free(guac_terminal* term) {
 
     /* Free the terminal itself */
     pthread_mutex_destroy(&term->lock);
+    pthread_cond_destroy(&term->text_output_acked);
     guac_mem_free(term);
 
 }
@@ -3063,6 +3068,9 @@ static int guac_terminal_text_output_ack(guac_user* user, guac_stream* stream,
 
         term->text_output_inflight--;
 
+        /* Room may now be available for a writer waiting on the window */
+        pthread_cond_broadcast(&term->text_output_acked);
+
     }
 
     guac_terminal_unlock(term);
@@ -3252,6 +3260,50 @@ int guac_terminal_text_output_should_open(int text_output, int disable_copy) {
     return text_output && !disable_copy;
 }
 
+/**
+ * Waits until the outstanding text-output window has room for another blob, or
+ * until the consumer has made no progress for
+ * GUAC_TERMINAL_TEXT_OUTPUT_STALL_TIMEOUT seconds. The terminal lock must
+ * already be held; it is released while waiting and reacquired before
+ * returning.
+ *
+ * This is used only in raw (headless) mode. Blocking here throttles the
+ * protocol read loop, which in turn applies backpressure to the remote program
+ * through the PTY, preserving the byte stream instead of discarding part of it.
+ * Because raw mode renders nothing graphically, no co-attached browser user can
+ * be starved by the pause.
+ *
+ * @param term
+ *     The terminal whose text-output window should be awaited.
+ */
+static void guac_terminal_text_output_await_window(guac_terminal* term) {
+
+    /* Nothing to wait for if the window already has room */
+    if (term->text_output_inflight < GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT
+            && term->text_output_inflight_bytes + term->text_output_length
+                    <= GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES)
+        return;
+
+    struct timespec deadline;
+    clock_gettime(CLOCK_REALTIME, &deadline);
+    deadline.tv_sec += term->text_output_stall_timeout;
+
+    while (term->text_output_stream != NULL
+            && (term->text_output_inflight
+                    >= GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT
+                || term->text_output_inflight_bytes + term->text_output_length
+                        > GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES)) {
+
+        /* Give up if the consumer has stopped acking entirely. The flush which
+         * follows will then find the window still full and abort. */
+        if (pthread_cond_timedwait(&term->text_output_acked, &term->lock,
+                    &deadline) == ETIMEDOUT)
+            return;
+
+    }
+
+}
+
 void guac_terminal_text_output_open(guac_terminal* term, const char* name,
         int flush_immediately) {
 
@@ -3266,6 +3318,7 @@ void guac_terminal_text_output_open(guac_terminal* term, const char* name,
     term->text_output_inflight = 0;
     term->text_output_inflight_bytes = 0;
     term->text_output_inflight_head = 0;
+    term->text_output_stall_timeout = GUAC_TERMINAL_TEXT_OUTPUT_STALL_TIMEOUT;
     term->text_output_flush_immediately = flush_immediately;
 
     /* Allocate and open the stream on the connection owner's socket, so raw
@@ -3314,9 +3367,15 @@ void guac_terminal_text_output_write(guac_terminal* term,
         }
 
         /* In raw (headless) mode there is no graphical frame cycle to flush the
-         * buffer, so flush immediately as data arrives. */
-        if (term->text_output_flush_immediately)
+         * buffer, so flush immediately as data arrives. Wait first for room in
+         * the outstanding-output window: raw mode renders nothing graphically,
+         * so no browser user can be starved by pausing here, and pausing
+         * propagates backpressure to the remote program through the PTY exactly
+         * as a slow local terminal would. */
+        if (term->text_output_flush_immediately) {
+            guac_terminal_text_output_await_window(term);
             guac_terminal_text_output_flush(term);
+        }
 
     }
 

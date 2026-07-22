@@ -83,6 +83,7 @@ static text_output_fixture* text_output_fixture_alloc(void) {
     fixture->term = guac_mem_zalloc(sizeof(guac_terminal));
     fixture->term->client = fixture->client;
     pthread_mutex_init(&fixture->term->lock, NULL);
+    pthread_cond_init(&fixture->term->text_output_acked, NULL);
 
     return fixture;
 
@@ -92,6 +93,7 @@ static void text_output_fixture_free(text_output_fixture* fixture) {
 
     if (fixture->term != NULL) {
         guac_terminal_text_output_close(fixture->term);
+        pthread_cond_destroy(&fixture->term->text_output_acked);
         pthread_mutex_destroy(&fixture->term->lock);
         guac_mem_free(fixture->term);
     }
@@ -285,6 +287,7 @@ void test_text_output__byte_bound_aborts_raw_mode(void) {
     text_output_fixture* fixture = text_output_fixture_alloc();
 
     guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+    fixture->term->text_output_stall_timeout = 0;
 
     /* Simulate a large outstanding backlog well within the blob-count limit.
      * Set directly rather than written, as actually sending this volume would
@@ -328,11 +331,72 @@ void test_text_output__close_marks_stream_unroutable(void) {
 
 }
 
+/**
+ * Acks every outstanding text-output blob once, after a short delay, as a
+ * consumer that is keeping up but lagging would.
+ */
+static void* delayed_ack_thread(void* data) {
+
+    text_output_fixture* fixture = (text_output_fixture*) data;
+
+    /* Let the writer reach the full window and block */
+    usleep(100000);
+
+    guac_stream* stream = fixture->term->text_output_stream;
+    while (fixture->term->text_output_inflight > 0)
+        stream->ack_handler(fixture->owner, stream, "OK",
+                GUAC_PROTOCOL_STATUS_SUCCESS);
+
+    return NULL;
+
+}
+
+/**
+ * Regression test: a raw-mode consumer which is merely slow must be throttled,
+ * not disconnected. Sustained output (a large "cat", say) will always outrun a
+ * consumer eventually; aborting in that situation kills healthy sessions, so
+ * the writer waits for the window to drain instead.
+ */
+void test_text_output__raw_mode_throttles_rather_than_aborting(void) {
+
+    text_output_fixture* fixture = text_output_fixture_alloc();
+
+    guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+
+    /* Present a full window, and a consumer which drains it shortly after */
+    fixture->term->text_output_inflight = GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT;
+    fixture->term->text_output_inflight_bytes = 4096;
+    for (int i = 0; i < GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT; i++)
+        fixture->term->text_output_inflight_sizes[i] = 16;
+
+    pthread_t acker;
+    pthread_create(&acker, NULL, delayed_ack_thread, fixture);
+
+    guac_terminal_text_output_write(fixture->term, "throttled", 9);
+
+    pthread_join(acker, NULL);
+
+    /* The session must survive, and the data must have been sent rather than
+     * dropped once room became available */
+    CU_ASSERT_EQUAL(fixture->client->state, GUAC_CLIENT_RUNNING);
+    CU_ASSERT_EQUAL(fixture->term->text_output_length, 0);
+
+    guac_terminal_text_output_close(fixture->term);
+    char* instructions = text_output_fixture_read(fixture);
+
+    CU_ASSERT_PTR_NOT_NULL(strstr(instructions, "4.blob"));
+
+    guac_mem_free(instructions);
+    text_output_fixture_free(fixture);
+
+}
+
 void test_text_output__raw_mode_aborts_when_consumer_stalls(void) {
 
     text_output_fixture* fixture = text_output_fixture_alloc();
 
     guac_terminal_text_output_open(fixture->term, "STDOUT", 1);
+    fixture->term->text_output_stall_timeout = 0;
     fixture->term->text_output_inflight = GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT;
 
     guac_terminal_text_output_write(fixture->term, "abort", 5);

@@ -63,16 +63,24 @@ outstanding blobs. The byte bound is the operative one: in raw mode every PTY
 read is flushed as its own blob, so blobs are frequently only a few bytes and a
 blob-count bound alone would be reached after a trivial amount of output.
 
-What happens on overrun depends on the mode, and the difference is deliberate:
+What happens when the window fills depends on the mode, and the difference is
+deliberate:
 
 * In tee mode, buffered output is **dropped** and the session continues. The tee
   shares the protocol read loop with the graphical display, so blocking on a
   stalled text consumer would also stall any co-attached browser user. Delivery
   is therefore best-effort, and a dropped chunk is logged as a warning.
-* In raw mode, the connection is **aborted** with `SERVER_ERROR` and the message
-  `text-output consumer is not keeping up`. The pipe is the session's only output
-  and is byte-oriented, so failing fast is preferable to handing the client a
-  silently-truncated stream.
+* In raw mode, the writer **waits** for the consumer to catch up. Raw mode
+  renders nothing graphically, so there is no browser user to starve, and
+  pausing the read loop propagates backpressure to the remote program through
+  the PTY exactly as a slow local terminal would. Sustained output always
+  outruns a consumer eventually, so throttling — not dropping, and not
+  disconnecting — is the only behavior that keeps the byte stream intact.
+
+A consumer that stops acking altogether cannot hold the session open
+indefinitely: if the window fails to drain for 15 seconds, the connection is
+aborted with `SERVER_ERROR` and the message
+`text-output consumer is not keeping up`.
 
 Manual tunnel smoke test
 ------------------------

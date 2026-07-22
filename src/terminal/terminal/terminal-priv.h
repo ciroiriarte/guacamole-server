@@ -62,6 +62,16 @@
 #define GUAC_TERMINAL_TEXT_OUTPUT_MAX_INFLIGHT_BYTES (256 * 1024)
 
 /**
+ * The number of seconds raw (headless) text-output mode will wait for a full
+ * outstanding-output window to drain before concluding that the consumer has
+ * stopped acking altogether and aborting the connection. A consumer that is
+ * merely slow keeps the window moving and is throttled rather than aborted;
+ * this bounds how long a consumer that has silently gone away can hold the
+ * remote session open.
+ */
+#define GUAC_TERMINAL_TEXT_OUTPUT_STALL_TIMEOUT 15
+
+/**
  * Handler for characters printed to the terminal. When a character is printed,
  * the current char handler for the terminal is called and given that
  * character.
@@ -238,6 +248,23 @@ struct guac_terminal {
      * text-output blob.
      */
     int text_output_inflight_head;
+
+    /**
+     * Condition signalled whenever an outstanding text-output blob is
+     * acknowledged, and thus whenever room may have become available within the
+     * outstanding-output window. Used with the terminal lock so that raw mode
+     * can wait for the consumer to catch up rather than discarding output.
+     */
+    pthread_cond_t text_output_acked;
+
+    /**
+     * The number of seconds raw text-output mode will wait for a full
+     * outstanding-output window to drain before aborting the connection,
+     * initialized from GUAC_TERMINAL_TEXT_OUTPUT_STALL_TIMEOUT when the stream
+     * is opened. Held per-terminal so that tests can exercise the give-up path
+     * without waiting the full production interval.
+     */
+    int text_output_stall_timeout;
 
     /**
      * Whether buffered text-output should be flushed immediately as it is
