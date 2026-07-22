@@ -22,9 +22,13 @@ protocols (SSH, telnet, Kubernetes):
 The outbound pipe is named `STDOUT`, uses mimetype `application/octet-stream`,
 carries base64 `blob` payloads, and is closed with `end`. It is allocated on the
 connection owner's user socket so client `ack` instructions route back to the
-stream handler. Clients must `ack` every received `blob`; guacd bounds text-output
-backlog at 16 unacknowledged blobs and drops further buffered output instead of
-blocking the PTY/read loop.
+stream handler. Clients must `ack` every received `blob`, on receipt rather than
+after rendering. guacd bounds the unacknowledged backlog at 256 KB (and at most
+256 outstanding blobs); the byte bound is the operative one, since raw mode emits
+one blob per PTY read. On overrun, tee mode drops further buffered output rather
+than blocking the PTY/read loop and stalling co-attached browser users, while raw
+mode aborts the connection with `SERVER_ERROR` rather than delivering a silently
+corrupted byte stream.
 
 `disable-copy` is honored, and raw pipe contents are not logged or recorded by
 default.
