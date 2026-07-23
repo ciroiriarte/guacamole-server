@@ -514,12 +514,37 @@ void guac_client_remove_user(guac_client* client, guac_user* user) {
 
     client->connected_users--;
 
-    /* Update owner pointer if user was owner */
-    if (user->owner)
+    /* Update owner pointer if user was owner, promoting a remaining user (if
+     * any) so the connection is not left ownerless. This re-establishes owner
+     * privileges for a user who reconnected and resumed the session: the
+     * previous owner's abandoned connection is reaped shortly after the resume,
+     * and the reconnected user (the sole remaining user of a gated resume) is
+     * promoted here. The __users_lock is held, so the user lists may be safely
+     * inspected. */
+    int promoted_owner = 0;
+    if (user->owner) {
+
         client->__owner = NULL;
+
+        guac_user* successor = client->__users;
+        if (successor == NULL)
+            successor = client->__pending_users;
+
+        if (successor != NULL) {
+            successor->owner = 1;
+            client->__owner = successor;
+            promoted_owner = 1;
+        }
+
+    }
 
     guac_rwlock_release_lock(&(client->__users_lock));
     guac_rwlock_release_lock(&(client->__pending_users_lock));
+
+    /* Log owner promotion outside the user locks */
+    if (promoted_owner)
+        guac_client_log(client, GUAC_LOG_INFO, "Connection owner left; "
+                "promoting a remaining user to owner.");
 
     /* Update owner of user having left the connection. */
     if (!user->owner)

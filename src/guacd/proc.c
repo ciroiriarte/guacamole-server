@@ -459,6 +459,19 @@ static void guacd_exec_proc(guacd_proc* proc, const char* protocol) {
     int received_fd;
     while ((received_fd = guacd_recv_fd(proc->fd_socket)) != -1) {
 
+        /* A later user is promoted to owner when the connection currently has
+         * none - i.e. the previous owner has left and this user is rejoining an
+         * ownerless session. This is what happens when the connection owner
+         * reconnects and resumes after a network drop (the session having been
+         * held open by the resume grace window): promoting them here restores
+         * the owner privileges (resize, disconnect, etc.) that would otherwise
+         * be lost on resume. The first user is always the owner already. */
+        if (!owner && client->__owner == NULL) {
+            owner = 1;
+            guacd_log(GUAC_LOG_INFO, "Reconnecting user promoted to owner of "
+                    "ownerless connection \"%s\".", client->connection_id);
+        }
+
         guacd_proc_add_user(proc, received_fd, owner);
 
         /* Future file descriptors are not owners */
