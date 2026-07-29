@@ -481,20 +481,33 @@ int guac_client_add_user(guac_client* client, guac_user* user, int argc, char** 
          */
         guac_client_add_pending_user(client, user);
 
+        /* Update the owner pointer under the users lock. This makes the
+         * check-then-set of client->__owner below atomic with respect to the
+         * owner promotion in guac_client_remove_user: both functions run on
+         * concurrent per-user handshake threads, so an unlocked check here
+         * could otherwise race a departing owner's removal and leave the
+         * connection either double-owned or ownerless. */
+        guac_rwlock_acquire_write_lock(&(client->__users_lock));
+
         /* Update owner pointer if user is owner */
         if (user->owner)
             client->__owner = user;
 
-        /* If the connection currently has no owner, promote this user to owner
-         * so it is not left ownerless. This makes a user who reconnects and
-         * resumes the session regain owner privileges when the previous owner
-         * was already reaped before the resume joined; the complementary case
-         * (the previous owner still present at join, then leaving) is handled
-         * in guac_client_remove_user. */
-        else if (client->__owner == NULL) {
+        /* If the connection is still running but currently has no owner,
+         * promote this user to owner so it is not left ownerless. This makes a
+         * user who reconnects and resumes the session regain owner privileges
+         * when the previous owner was already reaped before the resume joined;
+         * the complementary case (the previous owner still present at join,
+         * then leaving) is handled in guac_client_remove_user. Promotion is
+         * skipped once the client is stopping so a late joiner does not inherit
+         * ownership of a connection that is tearing down. */
+        else if (client->__owner == NULL
+                && client->state == GUAC_CLIENT_RUNNING) {
             user->owner = 1;
             client->__owner = user;
         }
+
+        guac_rwlock_release_lock(&(client->__users_lock));
 
     }
 
@@ -537,14 +550,23 @@ void guac_client_remove_user(guac_client* client, guac_user* user) {
 
         client->__owner = NULL;
 
-        guac_user* successor = client->__users;
-        if (successor == NULL)
-            successor = client->__pending_users;
+        /* Only promote a successor while the connection is still running.
+         * During teardown (guac_client_free walks the user list under this
+         * same lock after guac_client_stop) promotion would churn ownership
+         * across users that are all about to be removed, and would suppress
+         * the leave notification for each promoted-then-removed user. */
+        if (client->state == GUAC_CLIENT_RUNNING) {
 
-        if (successor != NULL) {
-            successor->owner = 1;
-            client->__owner = successor;
-            promoted_owner = 1;
+            guac_user* successor = client->__users;
+            if (successor == NULL)
+                successor = client->__pending_users;
+
+            if (successor != NULL) {
+                successor->owner = 1;
+                client->__owner = successor;
+                promoted_owner = 1;
+            }
+
         }
 
     }
