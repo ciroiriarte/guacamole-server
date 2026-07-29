@@ -485,6 +485,17 @@ int guac_client_add_user(guac_client* client, guac_user* user, int argc, char** 
         if (user->owner)
             client->__owner = user;
 
+        /* If the connection currently has no owner, promote this user to owner
+         * so it is not left ownerless. This makes a user who reconnects and
+         * resumes the session regain owner privileges when the previous owner
+         * was already reaped before the resume joined; the complementary case
+         * (the previous owner still present at join, then leaving) is handled
+         * in guac_client_remove_user. */
+        else if (client->__owner == NULL) {
+            user->owner = 1;
+            client->__owner = user;
+        }
+
     }
 
     /* Notify owner of user joining connection. */
