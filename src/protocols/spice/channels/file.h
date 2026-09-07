@@ -85,12 +85,6 @@
 #define GUAC_SPICE_FOLDER_ENOTSUP -10
 
 /**
- * The maximum number of bytes worth of inotify events that may be read at once
- * when monitoring the Download folder for changes.
- */
-#define GUAC_SPICE_FOLDER_MAX_EVENTS 256
-
-/**
  * The maximum number of bytes in a path string, including null terminator.
  */
 #define GUAC_SPICE_FOLDER_MAX_PATH 4096
@@ -189,6 +183,16 @@ typedef struct guac_spice_folder {
      * The path to the shared folder.
      */
     char* path;
+
+    /**
+     * A read-only directory descriptor for the shared folder root, opened once
+     * when the folder is allocated. All file operations resolve their target
+     * path relative to this descriptor without following symlinks, providing
+     * TOCTOU-safe confinement within the shared folder. This is -1 if the root
+     * directory could not be opened, in which case operations fall back to
+     * path-based (realpath) confinement.
+     */
+    int root_fd;
 
     /**
      * The number of currently open files in the folder.

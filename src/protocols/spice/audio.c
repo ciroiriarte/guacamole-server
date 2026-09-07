@@ -261,7 +261,7 @@ static int guac_spice_audio_parse_mimetype(const char* mimetype, int* rate,
  */
 static int16_t* guac_spice_resample_s16(const int16_t* in, int in_bytes,
         int in_rate, int in_channels, int out_rate, int out_channels,
-        int* out_length) {
+        size_t* out_length) {
 
     *out_length = 0;
 
@@ -317,7 +317,7 @@ static int16_t* guac_spice_resample_s16(const int16_t* in, int in_bytes,
 
     }
 
-    *out_length = (int) (out_frames * out_channels * sizeof(int16_t));
+    *out_length = (size_t) out_frames * (size_t) out_channels * sizeof(int16_t);
     return out;
 
 }
@@ -336,10 +336,17 @@ static int guac_spice_audio_blob_handler(guac_user* user, guac_stream* stream,
     if (spice_client->record_channel == NULL)
         return 0;
 
+    /* The record_rate/record_channels/input_rate/input_channels fields are
+     * written from the SPICE event-loop thread (record-start/record-stop
+     * handlers) while this blob handler runs on a guacd user thread; copy
+     * them out under message_lock to avoid torn reads and a mismatched
+     * rate/channel pairing, then do the resample/send work outside the lock */
+    pthread_mutex_lock(&(spice_client->message_lock));
     int rr = spice_client->record_rate;
     int rc = spice_client->record_channels;
     int ir = spice_client->input_rate;
     int ic = spice_client->input_channels;
+    pthread_mutex_unlock(&(spice_client->message_lock));
 
     /* Forward directly if the server's format is not yet known or already
      * matches the inbound stream */
@@ -350,7 +357,7 @@ static int guac_spice_audio_blob_handler(guac_user* user, guac_stream* stream,
     }
 
     /* Otherwise convert to the format the SPICE record channel expects */
-    int out_length = 0;
+    size_t out_length = 0;
     int16_t* resampled = guac_spice_resample_s16((const int16_t*) data, length,
             ir, ic, rr, rc, &out_length);
 
@@ -444,11 +451,33 @@ void guac_spice_client_audio_record_start_handler(SpiceRecordChannel* channel,
         gint format, gint channels, gint rate, guac_client* client) {
     guac_spice_client* spice_client = (guac_spice_client*) client->data;
 
+    /* Reject implausible sample rates / channel counts advertised by the
+     * SPICE server. The server is not a trusted party, and these values
+     * feed directly into resampler allocation size arithmetic in
+     * guac_spice_resample_s16(); bounding them here prevents integer
+     * overflow / oversized allocations downstream (CWE-190/CWE-400).
+     * Reset record_rate/record_channels (disabling resampling) rather than
+     * storing a hostile value or leaving an earlier valid format active. */
+    if (rate < GUAC_SPICE_AUDIO_MIN_RATE || rate > GUAC_SPICE_AUDIO_MAX_RATE
+            || channels < 1 || channels > GUAC_SPICE_AUDIO_MAX_CHANNELS) {
+        guac_client_log(client, GUAC_LOG_WARNING, "Ignoring SPICE audio "
+                "record format advertised by the server, as it is outside "
+                "the supported range (%d Hz, %d channel(s)).", rate, channels);
+        pthread_mutex_lock(&(spice_client->message_lock));
+        spice_client->record_rate = 0;
+        spice_client->record_channels = 0;
+        pthread_mutex_unlock(&(spice_client->message_lock));
+        return;
+    }
+
     /* Record the format the SPICE server expects so inbound audio can be
      * converted to match if the connected user is capturing at a different
-     * rate or channel count */
+     * rate or channel count. This is written under message_lock as the blob
+     * handler reads these fields from a different (guacd user) thread. */
+    pthread_mutex_lock(&(spice_client->message_lock));
     spice_client->record_rate = rate;
     spice_client->record_channels = channels;
+    pthread_mutex_unlock(&(spice_client->message_lock));
 
     guac_client_log(client, GUAC_LOG_DEBUG, "SPICE audio recording started "
             "(%d Hz, %d channel(s)).", rate, channels);
@@ -459,6 +488,15 @@ void guac_spice_client_audio_record_stop_handler(SpiceRecordChannel* channel,
         guac_client* client) {
     guac_client_log(client, GUAC_LOG_DEBUG, "SPICE audio recording stopped.");
     guac_spice_client* spice_client = (guac_spice_client*) client->data;
+
+    /* Reset the recorded format so a stale format from a previous recording
+     * session cannot remain active (and be read by the blob handler, which
+     * synchronizes on the same lock) once recording has stopped */
+    pthread_mutex_lock(&(spice_client->message_lock));
+    spice_client->record_rate = 0;
+    spice_client->record_channels = 0;
+    pthread_mutex_unlock(&(spice_client->message_lock));
+
     guac_client_for_owner(client, spice_client_record_stop_callback, spice_client);
 }
 

@@ -145,7 +145,13 @@ int guac_spice_client_free_handler(guac_client* client) {
     if (spice_client->main_loop != NULL)
         g_main_loop_quit(spice_client->main_loop);
 
-    pthread_join(spice_client->client_thread, NULL);
+    /* The client thread is started only for the connection owner (see
+     * guac_spice_user_join_handler() in user.c), so client_thread_started
+     * remains false for any other user, as well as for an owner whose
+     * connection attempt never reaches that point. Only join the thread if
+     * it was actually started. */
+    if (spice_client->client_thread_started)
+        pthread_join(spice_client->client_thread, NULL);
 
     /* Clean up the SPICE session */
     if (spice_client->spice_session != NULL) {

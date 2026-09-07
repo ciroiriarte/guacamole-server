@@ -85,6 +85,13 @@ int guac_spice_file_ls_ack_handler(guac_user* user, guac_stream* stream,
         if (file == NULL) {
             guac_user_log(user, GUAC_LOG_DEBUG, "%s: Successful open produced "
                     "bad file_id: %i", __func__, file_id);
+
+            /* Release both open file ids, the stream, and the ls state, as on
+             * the other exit paths - the folder pointer is not ours to free */
+            guac_spice_folder_close(ls_status->folder, file_id);
+            guac_spice_folder_close(ls_status->folder, ls_status->file_id);
+            guac_user_free_stream(user, stream);
+            free(ls_status);
             return 0;
         }
 

@@ -32,8 +32,32 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include <sys/stat.h>
+#include <unistd.h>
+
+/* Detect openat2() support. openat2() with RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS
+ * (Linux >= 5.6) resolves an entire path beneath a directory descriptor in a
+ * single, atomic, symlink-refusing call, which is the strongest available
+ * defense against path-traversal via symlinked/swapped components. The syscall
+ * is invoked directly (glibc has no wrapper), and its absence at build time or
+ * runtime (ENOSYS) is handled by falling back to an openat() component walk. */
+#ifdef __linux__
+#   if defined(__has_include)
+#       if __has_include(<linux/openat2.h>)
+#           include <linux/openat2.h>
+#           include <sys/syscall.h>
+#           if defined(SYS_openat2) && defined(RESOLVE_BENEATH) \
+                    && defined(RESOLVE_NO_SYMLINKS)
+#               define GUAC_SPICE_HAVE_OPENAT2 1
+#           endif
+#       endif
+#   endif
+#endif
 
 /**
  * Translates an absolute path for a shared folder to an absolute path which is
@@ -99,6 +123,209 @@ static void __guac_spice_folder_translate_path(guac_spice_folder* folder,
 
 }
 
+/**
+ * Resolves the parent directory of the given normalized path, returning an
+ * open directory descriptor for that parent. Every intermediate component is
+ * opened relative to the previous one via openat() with O_NOFOLLOW and
+ * O_DIRECTORY, starting from the trusted shared folder root descriptor, so no
+ * symlinked or swapped component can cause resolution to escape the shared
+ * folder. Intermediate directories are NOT created; they must already exist
+ * (matching the original behavior, which only created the final component).
+ *
+ * @param root_fd
+ *     A directory descriptor for the shared folder root. Must be valid (>= 0).
+ *
+ * @param normalized_path
+ *     The normalized, absolute (leading '/') path, free of "." and ".."
+ *     components, as produced by guac_spice_folder_normalize_path().
+ *
+ * @return
+ *     An open directory descriptor for the parent directory of the final path
+ *     component, which the caller must close(), or -1 on error with errno set.
+ */
+static int guac_spice_folder_resolve_parent_fd(int root_fd,
+        const char* normalized_path) {
+
+    /* Start at the shared folder root itself */
+    int cur = openat(root_fd, ".",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (cur < 0)
+        return -1;
+
+    /* Walk every component preceding the final one, descending one directory
+     * at a time. The final component (after the last '/') is left for the
+     * caller to open/create/unlink relative to the returned descriptor. */
+    const char* p = normalized_path + 1;
+    const char* final_slash = strrchr(normalized_path, '/');
+
+    while (p < final_slash) {
+
+        /* Isolate the next component */
+        const char* slash = memchr(p, '/', final_slash - p);
+        size_t len = slash ? (size_t) (slash - p) : (size_t) (final_slash - p);
+
+        if (len == 0 || len >= GUAC_SPICE_FOLDER_MAX_PATH) {
+            close(cur);
+            errno = ENOENT;
+            return -1;
+        }
+
+        char component[GUAC_SPICE_FOLDER_MAX_PATH];
+        memcpy(component, p, len);
+        component[len] = '\0';
+
+        /* Descend into the component without following symlinks */
+        int next = openat(cur, component,
+                O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        int saved_errno = errno;
+        close(cur);
+
+        if (next < 0) {
+            errno = saved_errno;
+            return -1;
+        }
+
+        cur = next;
+        p = slash ? slash + 1 : final_slash;
+
+    }
+
+    return cur;
+
+}
+
+#ifdef GUAC_SPICE_HAVE_OPENAT2
+/**
+ * Thin wrapper around the openat2() syscall, which glibc does not expose.
+ */
+static int guac_spice_folder_openat2(int dirfd, const char* pathname,
+        struct open_how* how, size_t size) {
+    return syscall(SYS_openat2, dirfd, pathname, how, size);
+}
+#endif
+
+/**
+ * Opens the final target of the given normalized path beneath the shared
+ * folder root, without following symlinks in any component. Where openat2() is
+ * available, a single RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS call is used;
+ * otherwise the parent directory is resolved via an openat() component walk and
+ * the final component is opened with O_NOFOLLOW. In both cases there is no gap
+ * between confinement check and use.
+ *
+ * @param folder
+ *     The shared folder whose root descriptor confines the open.
+ *
+ * @param normalized_path
+ *     The normalized, absolute path to open, relative to the shared folder root.
+ *
+ * @param flags
+ *     Standard POSIX open() flags.
+ *
+ * @param mode
+ *     The mode to use when O_CREAT is set.
+ *
+ * @return
+ *     An open file descriptor, or -1 on error with errno set.
+ */
+static int guac_spice_folder_confined_open(guac_spice_folder* folder,
+        const char* normalized_path, int flags, mode_t mode) {
+
+#ifdef GUAC_SPICE_HAVE_OPENAT2
+    /* Fast path: resolve and open the whole path atomically beneath the root,
+     * refusing every symlink and any escape above the root. */
+    {
+        const char* relative = normalized_path + 1;
+        if (*relative == '\0')
+            relative = ".";
+
+        struct open_how how;
+        memset(&how, 0, sizeof(how));
+        how.flags = (uint64_t) (flags | O_CLOEXEC | O_NOFOLLOW);
+        if (flags & O_CREAT)
+            how.mode = (uint64_t) mode;
+        how.resolve = RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS;
+
+        int fd = guac_spice_folder_openat2(folder->root_fd, relative,
+                &how, sizeof(how));
+
+        /* Only fall back if openat2() itself is unavailable at runtime; any
+         * other result (including a genuine open error) is authoritative. */
+        if (!(fd < 0 && errno == ENOSYS))
+            return fd;
+    }
+#endif
+
+    /* Fallback: resolve the parent via an openat() component walk, then open
+     * the final component with O_NOFOLLOW. */
+    int parent_fd = guac_spice_folder_resolve_parent_fd(folder->root_fd,
+            normalized_path);
+    if (parent_fd < 0)
+        return -1;
+
+    const char* basename = strrchr(normalized_path, '/') + 1;
+    const char* target = (*basename == '\0') ? "." : basename;
+
+    int fd = openat(parent_fd, target, flags | O_NOFOLLOW | O_CLOEXEC, mode);
+    int saved_errno = errno;
+    close(parent_fd);
+    errno = saved_errno;
+
+    return fd;
+
+}
+
+/**
+ * Creates the final directory component of the given normalized path beneath
+ * the shared folder root, resolving the parent without following symlinks.
+ * Mirrors the semantics of the original mkdir()-based directory creation: an
+ * existing directory is tolerated unless O_EXCL is set.
+ *
+ * @param folder
+ *     The shared folder whose root descriptor confines the operation.
+ *
+ * @param normalized_path
+ *     The normalized, absolute path of the directory to create.
+ *
+ * @param flags
+ *     The open() flags requested; O_EXCL forces failure if the directory
+ *     already exists.
+ *
+ * @return
+ *     Zero on success (including a pre-existing directory when O_EXCL is not
+ *     set), or -1 on error with errno set.
+ */
+static int guac_spice_folder_confined_mkdir(guac_spice_folder* folder,
+        const char* normalized_path, int flags) {
+
+    int parent_fd = guac_spice_folder_resolve_parent_fd(folder->root_fd,
+            normalized_path);
+    if (parent_fd < 0)
+        return -1;
+
+    const char* basename = strrchr(normalized_path, '/') + 1;
+
+    /* The root itself always exists and cannot be (re)created */
+    if (*basename == '\0') {
+        close(parent_fd);
+        errno = EEXIST;
+        return (flags & O_EXCL) ? -1 : 0;
+    }
+
+    int result = mkdirat(parent_fd, basename, S_IRWXU);
+    int saved_errno = errno;
+    close(parent_fd);
+
+    if (result) {
+        if (saved_errno != EEXIST || (flags & O_EXCL)) {
+            errno = saved_errno;
+            return -1;
+        }
+    }
+
+    return 0;
+
+}
+
 guac_spice_folder* guac_spice_folder_alloc(guac_client* client, const char* folder_path,
         int create_folder, int disable_download, int disable_upload) {
 
@@ -127,6 +354,22 @@ guac_spice_folder* guac_spice_folder_alloc(guac_client* client, const char* fold
     folder->open_files = 0;
     folder->disable_download = disable_download;
     folder->disable_upload = disable_upload;
+
+    /* Open a trusted directory descriptor for the shared folder root. All
+     * subsequent file operations resolve their targets relative to this
+     * descriptor without following symlinks, closing the check/use race that
+     * path-string-based confinement is subject to. O_NOFOLLOW is intentionally
+     * NOT used here: the root itself is administrator-configured and may
+     * legitimately be a symlink, exactly as the previous realpath()-based
+     * confinement permitted. If this open fails, root_fd stays -1 and
+     * operations fall back to the original path-based confinement so behavior
+     * degrades safely rather than breaking. */
+    folder->root_fd = open(folder_path, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (folder->root_fd < 0)
+        guac_client_log(client, GUAC_LOG_WARNING,
+                "Unable to open shared folder root \"%s\" for confined access: "
+                "%s. Falling back to path-based confinement.",
+                folder_path, strerror(errno));
 
     /* Set up Download directory and watch it. */
     if (!disable_download) {
@@ -166,6 +409,8 @@ guac_spice_folder* guac_spice_folder_alloc(guac_client* client, const char* fold
 }
 
 void guac_spice_folder_free(guac_spice_folder* folder) {
+    if (folder->root_fd >= 0)
+        close(folder->root_fd);
     guac_pool_free(folder->file_id_pool);
     guac_mem_free(folder->path);
     guac_mem_free(folder);
@@ -311,6 +556,42 @@ int guac_spice_folder_delete(guac_spice_folder* folder, int file_id) {
         return GUAC_SPICE_FOLDER_EINVAL;
     }
 
+    /* Preferred path: remove the entry relative to its parent directory,
+     * resolved beneath the trusted root descriptor without following symlinks.
+     * This avoids re-resolving the retained real_path string, which is subject
+     * to a check/use race if a component is swapped for a symlink after open. */
+    if (folder->root_fd >= 0) {
+
+        int parent_fd = guac_spice_folder_resolve_parent_fd(folder->root_fd,
+                file->absolute_path);
+        if (parent_fd < 0) {
+            guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                    "%s: unable to resolve parent of \"%s\": %s", __func__,
+                    file->absolute_path, strerror(errno));
+            return guac_spice_folder_get_errorcode(errno);
+        }
+
+        const char* basename = guac_spice_folder_basename(file->absolute_path);
+        int remove_result = unlinkat(parent_fd, basename,
+                S_ISDIR(file->stmode) ? AT_REMOVEDIR : 0);
+        int saved_errno = errno;
+        close(parent_fd);
+
+        if (remove_result) {
+            guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                    "%s: unlinkat() failed: \"%s\"", __func__,
+                    file->absolute_path);
+            errno = saved_errno;
+            return guac_spice_folder_get_errorcode(errno);
+        }
+
+        return 0;
+
+    }
+
+    /* Fallback path: operate on the retained real path string (used only when
+     * the trusted root descriptor is unavailable; see guac_spice_folder_alloc) */
+
     /* If directory, attempt removal */
     if (S_ISDIR(file->stmode)) {
         if (rmdir(file->real_path)) {
@@ -423,9 +704,13 @@ int guac_spice_folder_normalize_path(const char* path, char* abs_path) {
     const char* current_path_component = &(path_scratch[0]);
     for (int i = 0; i <= length; i++) {
 
-        /* If current character is a path separator, parse as component */
+        /* If current character is a path separator, parse as component.
+         * Both forward slashes and backslashes are treated as separators so
+         * that backslash-delimited components (e.g. "..\..\..") cannot slip
+         * through normalization unrecognized and later be rewritten into real
+         * "../" traversal by __guac_spice_folder_translate_path(). */
         char c = path_scratch[i];
-        if (c == '/' || c == '\0') {
+        if (c == '/' || c == '\\' || c == '\0') {
 
             /* Terminate current component */
             path_scratch[i] = '\0';
@@ -489,7 +774,7 @@ int guac_spice_folder_open(guac_spice_folder* folder, const char* path,
     if (folder->open_files >= GUAC_SPICE_FOLDER_MAX_FILES) {
         guac_client_log(folder->client, GUAC_LOG_DEBUG,
                 "%s: Too many open files.",
-                __func__, path);
+                __func__);
         return GUAC_SPICE_FOLDER_ENFILE;
     }
 
@@ -530,42 +815,153 @@ int guac_spice_folder_open(guac_spice_folder* folder, const char* path,
             "%s: Translated path \"%s\" to \"%s\".",
             __func__, normalized_path, real_path);
 
-    /* Create directory first, if necessary */
-    if (directory && (flags & O_CREAT)) {
+    /* Preferred path: resolve and open the target relative to the trusted root
+     * directory descriptor, without following symlinks in any component. This
+     * is atomic with respect to the filesystem (there is no check/use gap a
+     * concurrent writer could exploit by swapping a component for a symlink)
+     * and confines the target beneath the shared folder root. */
+    if (folder->root_fd >= 0) {
 
-        /* Create directory */
-        if (mkdir(real_path, S_IRWXU)) {
-            if (errno != EEXIST || (flags & O_EXCL)) {
+        /* Create directory first, if necessary */
+        if (directory && (flags & O_CREAT)) {
+
+            if (guac_spice_folder_confined_mkdir(folder, normalized_path,
+                    flags)) {
                 guac_client_log(folder->client, GUAC_LOG_DEBUG,
-                        "%s: mkdir() failed: %s",
+                        "%s: mkdirat() failed: %s",
                         __func__, strerror(errno));
                 return guac_spice_folder_get_errorcode(errno);
             }
+
+            /* Unset O_CREAT and O_EXCL as directory must exist before open() */
+            flags &= ~(O_CREAT | O_EXCL);
+
         }
 
-        /* Unset O_CREAT and O_EXCL as directory must exist before open() */
-        flags &= ~(O_CREAT | O_EXCL);
-
-    }
-
-    guac_client_log(folder->client, GUAC_LOG_DEBUG,
-            "%s: native open: real_path=\"%s\", flags=0x%x",
-            __func__, real_path, flags);
-
-    /* Open file */
-    fd = open(real_path, flags, S_IRUSR | S_IWUSR);
-
-    /* If file open failed as we're trying to write a dir, retry as read-only */
-    if (fd == -1 && errno == EISDIR) {
-        flags &= ~(O_WRONLY | O_RDWR);
-        flags |= O_RDONLY;
-        fd = open(real_path, flags, S_IRUSR | S_IWUSR);
-    }
-
-    if (fd == -1) {
         guac_client_log(folder->client, GUAC_LOG_DEBUG,
-                "%s: open() failed: %s", __func__, strerror(errno));
-        return guac_spice_folder_get_errorcode(errno);
+                "%s: confined open: real_path=\"%s\", flags=0x%x",
+                __func__, real_path, flags);
+
+        fd = guac_spice_folder_confined_open(folder, normalized_path, flags,
+                S_IRUSR | S_IWUSR);
+
+        /* If open failed as we're trying to write a dir, retry read-only */
+        if (fd == -1 && errno == EISDIR) {
+            flags &= ~(O_WRONLY | O_RDWR);
+            flags |= O_RDONLY;
+            fd = guac_spice_folder_confined_open(folder, normalized_path,
+                    flags, S_IRUSR | S_IWUSR);
+        }
+
+        if (fd == -1) {
+            guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                    "%s: open() failed: %s", __func__, strerror(errno));
+            return guac_spice_folder_get_errorcode(errno);
+        }
+
+    }
+
+    /* Fallback path: used only when the trusted root descriptor could not be
+     * opened at allocation time (see guac_spice_folder_alloc). This preserves
+     * the original realpath()-based confinement so access degrades safely
+     * rather than breaking outright. */
+    else {
+
+        /* Create directory first, if necessary */
+        if (directory && (flags & O_CREAT)) {
+
+            /* Create directory */
+            if (mkdir(real_path, S_IRWXU)) {
+                if (errno != EEXIST || (flags & O_EXCL)) {
+                    guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                            "%s: mkdir() failed: %s",
+                            __func__, strerror(errno));
+                    return guac_spice_folder_get_errorcode(errno);
+                }
+            }
+
+            /* Unset O_CREAT and O_EXCL as directory must exist before open() */
+            flags &= ~(O_CREAT | O_EXCL);
+
+        }
+
+        /* Defense-in-depth confinement: canonicalize the parent directory of
+         * the target and verify it resolves to within the shared folder root.
+         * This catches any symlink (including intermediate path components,
+         * which O_NOFOLLOW alone does not cover) that would resolve the target
+         * outside of folder->path. By this point any directory to be opened has
+         * already been created above, so the parent directory is guaranteed to
+         * exist and can be canonicalized with realpath(). */
+        {
+
+            char parent_path[GUAC_SPICE_FOLDER_MAX_PATH];
+            guac_strlcpy(parent_path, real_path, sizeof(parent_path));
+
+            /* Split the final path component from its parent directory */
+            char* last_slash = strrchr(parent_path, '/');
+            if (last_slash == NULL) {
+                guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                        "%s: Access denied - no path separator in real path "
+                        "\"%s\".", __func__, real_path);
+                return GUAC_SPICE_FOLDER_ENOENT;
+            }
+
+            /* Reduce to the parent directory, keeping the root "/" intact */
+            if (last_slash == parent_path)
+                parent_path[1] = '\0';
+            else
+                *last_slash = '\0';
+
+            /* Canonicalize the parent directory and the shared folder root */
+            char canonical_parent[PATH_MAX];
+            char canonical_root[PATH_MAX];
+            if (realpath(parent_path, canonical_parent) == NULL
+                    || realpath(folder->path, canonical_root) == NULL) {
+                guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                        "%s: Access denied - unable to canonicalize path "
+                        "\"%s\".", __func__, real_path);
+                return GUAC_SPICE_FOLDER_ENOENT;
+            }
+
+            /* Verify the canonical parent is the shared folder root itself or a
+             * directory beneath it (prefix match bounded by a path separator,
+             * so e.g. "/share-evil" does not pass as being under "/share"). The
+             * root-slash exception covers a shared folder mounted at "/". */
+            size_t root_len = strlen(canonical_root);
+            if (strncmp(canonical_parent, canonical_root, root_len) != 0
+                    || (canonical_root[root_len - 1] != '/'
+                        && canonical_parent[root_len] != '\0'
+                        && canonical_parent[root_len] != '/')) {
+                guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                        "%s: Access denied - path \"%s\" resolves outside of "
+                        "shared folder.", __func__, real_path);
+                return GUAC_SPICE_FOLDER_ENOENT;
+            }
+
+        }
+
+        guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                "%s: native open: real_path=\"%s\", flags=0x%x",
+                __func__, real_path, flags);
+
+        /* Open file. O_NOFOLLOW ensures a symlink placed as the final path
+         * component is not followed, preventing symlink-based escapes out of
+         * the shared folder. */
+        fd = open(real_path, flags | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+
+        /* If open failed as we're trying to write a dir, retry read-only */
+        if (fd == -1 && errno == EISDIR) {
+            flags &= ~(O_WRONLY | O_RDWR);
+            flags |= O_RDONLY;
+            fd = open(real_path, flags | O_NOFOLLOW, S_IRUSR | S_IWUSR);
+        }
+
+        if (fd == -1) {
+            guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                    "%s: open() failed: %s", __func__, strerror(errno));
+            return guac_spice_folder_get_errorcode(errno);
+        }
+
     }
 
     /* Get file ID, init file */
@@ -627,9 +1023,16 @@ int guac_spice_folder_read(guac_spice_folder* folder, int file_id, uint64_t offs
         return GUAC_SPICE_FOLDER_EINVAL;
     }
 
-    /* Attempt read */
-    lseek(file->fd, offset, SEEK_SET);
-    bytes_read = read(file->fd, buffer, length);
+    /* Reject an offset which cannot be represented as an off_t, as it would
+     * otherwise be truncated/wrapped to a different, in-bounds file position */
+    if (offset > (uint64_t) INT64_MAX) {
+        guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                "%s: Rejecting read at out-of-range offset", __func__);
+        return GUAC_SPICE_FOLDER_EINVAL;
+    }
+
+    /* Attempt read at the requested offset */
+    bytes_read = pread(file->fd, buffer, length, (off_t) offset);
 
     /* Translate errno on error */
     if (bytes_read < 0)
@@ -683,9 +1086,16 @@ int guac_spice_folder_write(guac_spice_folder* folder, int file_id, uint64_t off
         return GUAC_SPICE_FOLDER_EINVAL;
     }
 
-    /* Attempt write */
-    lseek(file->fd, offset, SEEK_SET);
-    bytes_written = write(file->fd, buffer, length);
+    /* Reject an offset which cannot be represented as an off_t, as it would
+     * otherwise be truncated/wrapped to a different, in-bounds file position */
+    if (offset > (uint64_t) INT64_MAX) {
+        guac_client_log(folder->client, GUAC_LOG_DEBUG,
+                "%s: Rejecting write at out-of-range offset", __func__);
+        return GUAC_SPICE_FOLDER_EINVAL;
+    }
+
+    /* Attempt write at the requested offset */
+    bytes_written = pwrite(file->fd, buffer, length, (off_t) offset);
 
     /* Translate errno on error */
     if (bytes_written < 0)

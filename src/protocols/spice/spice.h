@@ -38,6 +38,7 @@
 #endif
 
 #include <pthread.h>
+#include <stdbool.h>
 
 /**
  * The maximum number of milliseconds to wait between iterations of the
@@ -119,6 +120,16 @@ typedef struct guac_spice_client {
      * The SPICE client thread.
      */
     pthread_t client_thread;
+
+    /**
+     * Whether client_thread has been successfully started via
+     * pthread_create(). The client thread is started only for the connection
+     * owner (see guac_spice_user_join_handler() in user.c), so this remains
+     * false for any other user, as well as for an owner whose connection
+     * attempt never reaches that point. Used to determine whether
+     * client_thread must be joined during cleanup.
+     */
+    bool client_thread_started;
 
     /**
      * The underlying SPICE session, which manages all individual channel

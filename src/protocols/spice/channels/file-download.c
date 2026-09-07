@@ -32,89 +32,22 @@
 #include <guacamole/string.h>
 #include <guacamole/user.h>
 
-#include <errno.h>
 #include <fcntl.h>
-#include <pthread.h>
 #include <stdlib.h>
-#include <sys/inotify.h>
 #include <sys/stat.h>
 
-void* guac_spice_file_download_monitor(void* data) {
-
-    guac_spice_folder* folder = (guac_spice_folder*) data;
-    char download_path[GUAC_SPICE_FOLDER_MAX_PATH];
-    char download_events[GUAC_SPICE_FOLDER_MAX_EVENTS];
-    char file_path[GUAC_SPICE_FOLDER_MAX_PATH];
-    const struct inotify_event *event;
-
-    guac_client_log(folder->client, GUAC_LOG_DEBUG, "%s: Starting up file monitor thread.", __func__);
-
-    /* If folder has already been freed, or isn't open, yet, don't do anything. */
-    if (folder == NULL)
-        return NULL;
-
-    download_path[0] = '\0';
-    guac_strlcat(download_path, folder->path, GUAC_SPICE_FOLDER_MAX_PATH);
-    guac_strlcat(download_path, "/Download", GUAC_SPICE_FOLDER_MAX_PATH);
-
-    guac_client_log(folder->client, GUAC_LOG_DEBUG, "%s: Watching folder at path \"%s\".", __func__, download_path);
-
-    int notify = inotify_init();
-
-    if (notify == -1) {
-        guac_client_log(folder->client, GUAC_LOG_ERROR,
-                "%s: Failed to start inotify, automatic downloads will not work: %s",
-                __func__, strerror(errno));
-        return NULL;
-    }
-
-    if(inotify_add_watch(notify, download_path, IN_CREATE | IN_ATTRIB | IN_CLOSE_WRITE | IN_MOVED_TO | IN_ONLYDIR | IN_EXCL_UNLINK) == -1) {
-        guac_client_log(folder->client, GUAC_LOG_ERROR,
-                "%s: Failed to set inotify flags for \"%s\".",
-                __func__, download_path);
-        return NULL;
-    }
-
-    while (true) {
-        int events = read(notify, download_events, sizeof(download_events));
-        if (events == -1 && errno != EAGAIN) {
-            guac_client_log(folder->client, GUAC_LOG_ERROR,
-                    "%s: Failed to read inotify events: %s",
-                    __func__, strerror(errno));
-            return NULL;
-        }
-
-        if (events <= 0)
-            continue;
-
-        
-        for (char* ptr = download_events; ptr < download_events + events; ptr += sizeof(struct inotify_event) + event->len) {
-            
-            event = (const struct inotify_event *) ptr;
-
-            if (event->mask & IN_ISDIR) {
-                guac_client_log(folder->client, GUAC_LOG_DEBUG, "%s: Ignoring event 0x%x for directory %s.", __func__, event->mask, event->name);
-                continue;
-            }
-
-            guac_client_log(folder->client, GUAC_LOG_ERROR,
-                    "%s: 0x%x - Downloading the file: %s", __func__, event->mask, event->name, event->cookie);
-
-            file_path[0] = '\0';
-            guac_strlcat(file_path, "/Download/", GUAC_SPICE_FOLDER_MAX_PATH);
-            guac_strlcat(file_path, event->name, GUAC_SPICE_FOLDER_MAX_PATH);
-            // guac_client_for_owner(folder->client, guac_spice_file_download_to_user, file_path);
-            //int fileid = guac_spice_folder_open(folder, file_path, O_WRONLY, 0, 0);
-            // guac_spice_folder_delete(folder, fileid);
-            
-
-        }
-
-    }
-
-    return NULL;
-
-}
+/*
+ * The automatic download-on-create monitor (guac_spice_file_download_monitor)
+ * has been removed. It was dead code: its actual transfer action was never
+ * implemented (only commented out), while it built filesystem paths directly
+ * from untrusted inotify event names (CWE-22) and held a raw guac_spice_folder
+ * pointer that guac_spice_folder_free() releases at disconnect without stopping
+ * or joining the thread (CWE-416). The thread was never started (see the
+ * comment in guac_spice_folder_alloc()); removing the function ensures the
+ * trap cannot be re-enabled by accident. If the feature is ever completed, it
+ * must be reintroduced together with a proper shutdown path and validation of
+ * event names against the shared-folder boundary.
+ */
 
 int guac_spice_file_download_ack_handler(guac_user* user, guac_stream* stream,
         char* message, guac_protocol_status status) {
@@ -195,7 +128,7 @@ int guac_spice_file_download_get_handler(guac_user* user, guac_object* object,
     /* Attempt to open file for reading */
     int file_id = guac_spice_folder_open(folder, name, flags, 0, 0);
     if (file_id < 0) {
-        guac_user_log(user, GUAC_LOG_INFO, "Unable to read file \"%s\"",
+        guac_user_log(user, GUAC_LOG_DEBUG, "Unable to read file \"%s\"",
                 name);
         return 0;
     }
@@ -254,7 +187,7 @@ int guac_spice_file_download_get_handler(guac_user* user, guac_object* object,
     }
 
     else
-        guac_client_log(client, GUAC_LOG_INFO, "Unable to download file "
+        guac_client_log(client, GUAC_LOG_DEBUG, "Unable to download file "
                 "\"%s\", file downloads have been disabled.", name);
 
     guac_socket_flush(user->socket);
@@ -316,7 +249,7 @@ void* guac_spice_file_download_to_user(guac_user* user, void* data) {
     }
 
     /* Download failed */
-    guac_user_log(user, GUAC_LOG_ERROR, "Unable to download \"%s\"", path);
+    guac_user_log(user, GUAC_LOG_DEBUG, "Unable to download \"%s\"", path);
     return NULL;
 
 }

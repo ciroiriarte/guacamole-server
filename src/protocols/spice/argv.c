@@ -35,6 +35,8 @@ int guac_spice_argv_callback(guac_user* user, const char* mimetype,
     guac_spice_client* spice_client = (guac_spice_client*) client->data;
     guac_spice_settings* settings = spice_client->settings;
 
+    pthread_mutex_lock(&spice_client->message_lock);
+
     /* Update username */
     if (strcmp(name, GUAC_SPICE_ARGV_USERNAME) == 0) {
         guac_mem_free(settings->username);
@@ -43,9 +45,15 @@ int guac_spice_argv_callback(guac_user* user, const char* mimetype,
 
     /* Update password */
     else if (strcmp(name, GUAC_SPICE_ARGV_PASSWORD) == 0) {
+        /* Scrub the previous secret from memory before freeing it, so a stale
+         * password ticket does not linger on the heap after being replaced. */
+        if (settings->password != NULL)
+            explicit_bzero(settings->password, strlen(settings->password));
         guac_mem_free(settings->password);
         settings->password = guac_strdup(value);
     }
+
+    pthread_mutex_unlock(&spice_client->message_lock);
 
     return 0;
 

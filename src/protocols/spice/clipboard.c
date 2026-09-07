@@ -28,6 +28,7 @@
 #include <guacamole/recording.h>
 #include <guacamole/socket.h>
 #include <guacamole/stream.h>
+#include <guacamole/string.h>
 #include <guacamole/user.h>
 #include <spice-client.h>
 #include <spice/vd_agent.h>
@@ -259,9 +260,32 @@ static void guac_spice_clipboard_selection(SpiceMainChannel* channel,
 
     /* Replace clipboard contents with received data and broadcast to users. The
      * data may be binary (for images); guac_common_clipboard stores and streams
-     * it by length, so this is safe for non-text mimetypes. */
-    guac_common_clipboard_reset(spice_client->clipboard, mimetype);
-    guac_common_clipboard_append(spice_client->clipboard, (char*) data, (int) size);
+     * it by length, so this is safe for non-text mimetypes.
+     *
+     * The reset and append are done here under a single hold of the clipboard
+     * lock, rather than via guac_common_clipboard_reset() and
+     * guac_common_clipboard_append() (which each take and release the lock on
+     * their own), so a concurrent guac_spice_clipboard_request() cannot
+     * observe a mimetype from this update paired with bytes from another.
+     * guac_common_clipboard_send() re-acquires the (non-recursive) lock
+     * internally, so it is called only after this section releases it, to
+     * avoid a self-deadlock. */
+    guac_common_clipboard* clipboard = spice_client->clipboard;
+    pthread_mutex_lock(&clipboard->lock);
+
+    clipboard->length = 0;
+    guac_strlcpy(clipboard->mimetype, mimetype, sizeof(clipboard->mimetype));
+
+    int append_length = (int) size;
+    int remaining = clipboard->available - clipboard->length;
+    if (remaining < append_length)
+        append_length = remaining;
+
+    memcpy(clipboard->buffer + clipboard->length, data, append_length);
+    clipboard->length += append_length;
+
+    pthread_mutex_unlock(&clipboard->lock);
+
     guac_common_clipboard_send(spice_client->clipboard, client);
 
     /* Record this guest-to-client transfer. Unlike client-to-guest pastes (which

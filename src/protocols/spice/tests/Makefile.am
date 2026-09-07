@@ -34,12 +34,14 @@ check_PROGRAMS = test_spice
 TESTS = $(check_PROGRAMS)
 
 test_spice_SOURCES = \
+    channels/path.c \
     keymap/find.c
 
 test_spice_CFLAGS =                \
     -Werror -Wall -pedantic        \
     @LIBGUAC_CLIENT_SPICE_INCLUDE@ \
-    @LIBGUAC_INCLUDE@
+    @LIBGUAC_INCLUDE@              \
+    @SPICE_CFLAGS@
 
 test_spice_LDADD =               \
     @CUNIT_LIBS@                 \

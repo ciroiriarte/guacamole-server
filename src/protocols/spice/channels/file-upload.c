@@ -64,6 +64,7 @@ static void __generate_upload_path(const char* filename, char* path) {
 
     /* Add initial slash (the shared folder uses absolute, forward-slash
      * paths, as required by guac_spice_folder_normalize_path()) */
+    char* root = path;
     *(path++) = '/';
 
     for (i=1; i<GUAC_SPICE_FOLDER_MAX_PATH; i++) {
@@ -83,6 +84,13 @@ static void __generate_upload_path(const char* filename, char* path) {
 
     /* Terminate path */
     *path = '\0';
+
+    /* Never allow an empty name or the special directory entries "." / ".." —
+     * substitute a safe default so the upload path is always a real file
+     * (mirrors __sanitize_filename) */
+    if (strcmp(root, "/") == 0 || strcmp(root, "/.") == 0
+            || strcmp(root, "/..") == 0)
+        strcpy(root, "/upload.bin");
 
 }
 
@@ -170,6 +178,16 @@ int guac_spice_file_upload_blob_handler(guac_user* user, guac_stream* stream,
 
         /* On error, abort */
         if (bytes_written < 0) {
+            guac_protocol_send_ack(user->socket, stream,
+                    "FAIL (BAD WRITE)",
+                    GUAC_PROTOCOL_STATUS_CLIENT_FORBIDDEN);
+            guac_socket_flush(user->socket);
+            return 0;
+        }
+
+        /* A zero-length write for a non-empty request means no forward progress
+         * can be made; treat it as an error rather than spinning forever */
+        if (bytes_written == 0) {
             guac_protocol_send_ack(user->socket, stream,
                     "FAIL (BAD WRITE)",
                     GUAC_PROTOCOL_STATUS_CLIENT_FORBIDDEN);
@@ -404,13 +422,13 @@ static void guac_spice_agent_copy_ready(GObject* source_object,
     GError* error = NULL;
 
     if (spice_main_channel_file_copy_finish(main_channel, result, &error))
-        guac_client_log(upload->client, GUAC_LOG_INFO,
+        guac_client_log(upload->client, GUAC_LOG_DEBUG,
                 "File transfer client->guest complete: \"%s\" (%" PRIu64
                 " bytes) pushed into the guest via the SPICE agent (the guest "
                 "agent saves it to the user's download/desktop location).",
                 upload->filename, upload->bytes);
     else
-        guac_client_log(upload->client, GUAC_LOG_WARNING,
+        guac_client_log(upload->client, GUAC_LOG_DEBUG,
                 "File transfer client->guest failed for \"%s\" via the SPICE "
                 "agent: %s", upload->filename,
                 error != NULL ? error->message : "unknown error");
@@ -452,7 +470,7 @@ static void guac_spice_agent_copy_dispatch(guac_spice_deferred_call* call) {
         g_object_get(main_channel, "agent-connected", &agent_connected, NULL);
 
     if (!agent_connected) {
-        guac_client_log(upload->client, GUAC_LOG_WARNING,
+        guac_client_log(upload->client, GUAC_LOG_DEBUG,
                 "File transfer client->guest aborted for \"%s\": the SPICE "
                 "guest agent is not connected.", upload->filename);
         guac_spice_agent_upload_free(upload);
@@ -516,7 +534,7 @@ int guac_spice_file_upload_agent_handler(guac_user* user, guac_stream* stream,
     char* tmppath = g_build_filename(tmpdir, safe_name, NULL);
     int fd = open(tmppath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
     if (fd < 0) {
-        guac_client_log(client, GUAC_LOG_ERROR, "Unable to stage direct "
+        guac_client_log(client, GUAC_LOG_DEBUG, "Unable to stage direct "
                 "upload file \"%s\".", tmppath);
         rmdir(tmpdir);
         g_free(tmppath);

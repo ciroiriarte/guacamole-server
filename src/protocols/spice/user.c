@@ -76,6 +76,8 @@ int guac_spice_user_join_handler(guac_user* user, int argc, char** argv) {
             return 1;
         }
 
+        spice_client->client_thread_started = true;
+
     }
 
     /* Only handle events if not read-only */
@@ -106,10 +108,16 @@ int guac_spice_user_join_handler(guac_user* user, int argc, char** argv) {
         /* Route the generic (non-filesystem) upload gesture according to the
          * file-transfer mode, taking precedence over SFTP. In "agent"/"both"
          * dropped files are pushed into the guest via the SPICE agent; in
-         * "drive" they are written to the shared folder. The exposed filesystem
-         * object still handles its own get/put (download/ls/upload) requests
-         * for the drive browser regardless of this routing. */
-        if (!settings->disable_upload) {
+         * "drive" they are written to the shared folder.
+         *
+         * Restricted to the connection owner: these uploads act with the
+         * owner's authority — they push into the guest over the owner's SPICE
+         * session or write to the owner's shared folder — so a joined non-owner
+         * user must not be able to drive them. The filesystem object that serves
+         * the drive browser's own get/put (download/ls/upload) is likewise
+         * exposed only to the owner (guac_client_for_owner() in
+         * guac_spice_client_thread()), so those paths are already owner-confined. */
+        if (user->owner && !settings->disable_upload) {
             switch (settings->file_transfer_mode) {
 
                 case GUAC_SPICE_FILE_TRANSFER_AGENT:

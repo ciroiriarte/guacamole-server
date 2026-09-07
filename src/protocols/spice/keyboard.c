@@ -678,11 +678,16 @@ void guac_spice_keyboard_set_indicators(SpiceChannel* channel, guac_client* clie
 
     pthread_rwlock_rdlock(&(spice_client->lock));
 
+    /* Serialize mutation of shared keyboard state (keyboard->modifiers)
+     * against other keyboard-state writers, as the lock above is held only
+     * for read. */
+    pthread_mutex_lock(&(spice_client->message_lock));
+
     /* Skip if keyboard not yet ready */
     guac_spice_keyboard* keyboard = spice_client->keyboard;
     if (keyboard == NULL)
         goto complete;
-    
+
     unsigned int modifiers;
     g_object_get(channel, SPICE_PROPERTY_KEY_MODIFIERS, &modifiers, NULL);
 
@@ -691,6 +696,7 @@ void guac_spice_keyboard_set_indicators(SpiceChannel* channel, guac_client* clie
     keyboard->modifiers = modifiers;
 
 complete:
+    pthread_mutex_unlock(&(spice_client->message_lock));
     pthread_rwlock_unlock(&(spice_client->lock));
 
 }

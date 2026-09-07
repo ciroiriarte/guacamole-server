@@ -20,6 +20,7 @@
 #include "config.h"
 
 #include "argv.h"
+#include "common/clipboard.h"
 #include "keymap.h"
 #include "settings.h"
 
@@ -572,9 +573,10 @@ guac_spice_settings* guac_spice_parse_args(guac_user* user,
                 IDX_DISABLE_CLIPBOARD, false);
 
     settings->clipboard_buffer_size =
-        guac_user_parse_args_int(user, GUAC_SPICE_CLIENT_ARGS, argv,
+        guac_user_parse_args_int_bounded(user, GUAC_SPICE_CLIENT_ARGS, argv,
                 IDX_CLIPBOARD_BUFFER_SIZE,
-                GUAC_SPICE_CLIPBOARD_DEFAULT_BUFFER_SIZE);
+                GUAC_SPICE_CLIPBOARD_DEFAULT_BUFFER_SIZE,
+                1, GUAC_COMMON_CLIPBOARD_MAX_LENGTH);
 
     settings->audio_enabled =
         guac_user_parse_args_boolean(user, GUAC_SPICE_CLIENT_ARGS, argv,
@@ -800,6 +802,8 @@ void guac_spice_settings_free(guac_spice_settings* settings) {
     guac_mem_free(settings->port);
     guac_mem_free(settings->tls_port);
     guac_mem_free(settings->username);
+    if (settings->password != NULL)
+        explicit_bzero(settings->password, strlen(settings->password));
     guac_mem_free(settings->password);
     guac_mem_free(settings->ca_file);
     guac_mem_free(settings->cert_subject);
@@ -818,7 +822,12 @@ void guac_spice_settings_free(guac_spice_settings* settings) {
     guac_mem_free(settings->sftp_root_directory);
     guac_mem_free(settings->sftp_host_key);
     guac_mem_free(settings->sftp_hostname);
+    if (settings->sftp_passphrase != NULL)
+        explicit_bzero(settings->sftp_passphrase, strlen(settings->sftp_passphrase));
     guac_mem_free(settings->sftp_passphrase);
+
+    if (settings->sftp_password != NULL)
+        explicit_bzero(settings->sftp_password, strlen(settings->sftp_password));
     guac_mem_free(settings->sftp_password);
     guac_mem_free(settings->sftp_port);
     guac_mem_free(settings->sftp_private_key);

@@ -45,19 +45,6 @@ typedef struct guac_spice_file_download_status {
 
 } guac_spice_file_download_status;
 
-/**
- * Function which uses Linux's inotify facility to monitor the "Download"
- * directory of a shared folder for changes and trigger the automatic download
- * of that data to the Guacamole user who has access to the shared folder.
- *
- * @param data
- *     A pointer to the guac_spice_folder structure in which the Download
- *     folder is located.
- * 
- * @return
- *     Always NULL
- */
-void* guac_spice_file_download_monitor(void* data);
 
 /**
  * Handler for acknowledgements of receipt of data related to file downloads.

@@ -237,6 +237,11 @@ int guac_spice_user_key_handler(guac_user* user, int keysym, int pressed) {
 
     pthread_rwlock_rdlock(&(spice_client->lock));
 
+    /* Serialize mutation of shared keyboard state (user_pressed_keys,
+     * key->pressed, keyboard->modifiers) against other keyboard-state
+     * writers, as the lock above is held only for read. */
+    pthread_mutex_lock(&(spice_client->message_lock));
+
     /* Translate and send the key event only once the inputs channel and
      * keyboard are ready. The keyboard handles mapping the keysym to the
      * appropriate scancode(s) for the negotiated keyboard layout, including
@@ -244,6 +249,8 @@ int guac_spice_user_key_handler(guac_user* user, int keysym, int pressed) {
     if (spice_client->inputs_channel != NULL && spice_client->keyboard != NULL)
         retval = guac_spice_keyboard_update_keysym(spice_client->keyboard,
                 keysym, pressed, GUAC_SPICE_KEY_SOURCE_CLIENT);
+
+    pthread_mutex_unlock(&(spice_client->message_lock));
 
     pthread_rwlock_unlock(&(spice_client->lock));
 
@@ -473,6 +480,15 @@ static void guac_spice_do_queue_resize(guac_spice_deferred_call* call) {
         if (x_position < 0 || x_position >= max_monitors
                 || x_position > spice_client->monitors_count)
             return;
+
+        /* Clamp client-supplied dimensions so the sum of monitor widths
+         * accumulated by guac_spice_monitors_recalc_offsets() cannot overflow
+         * left_offset (an int), regardless of how many monitors are active. */
+        if (width > GUAC_DISPLAY_MAX_WIDTH)
+            width = GUAC_DISPLAY_MAX_WIDTH;
+
+        if (height > GUAC_DISPLAY_MAX_HEIGHT)
+            height = GUAC_DISPLAY_MAX_HEIGHT;
 
         guac_spice_monitor* monitor = &spice_client->monitors[x_position];
         monitor->width      = width;

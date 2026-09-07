@@ -60,6 +60,19 @@ static void guac_spice_cursor_set(SpiceCursorChannel* channel,
         return;
     }
 
+    /* Clamp the server-supplied hotspot to the (now-validated) cursor
+     * dimensions. This is defense-in-depth against an out-of-range hotspot
+     * from the untrusted SPICE server being forwarded to libguac unchecked. */
+    if (hot_x < 0)
+        hot_x = 0;
+    else if (hot_x >= width)
+        hot_x = width - 1;
+
+    if (hot_y < 0)
+        hot_y = 0;
+    else if (hot_y >= height)
+        hot_y = height - 1;
+
     /* Begin drawing operation directly to the cursor layer */
     guac_display_layer* cursor_layer = guac_display_cursor(spice_client->display);
     guac_display_layer_resize(cursor_layer, width, height);
@@ -72,38 +85,53 @@ static void guac_spice_cursor_set(SpiceCursorChannel* channel,
     guac_rect_init(&op_bounds, 0, 0, width, height);
     guac_rect_constrain(&op_bounds, &context->bounds);
 
-    const unsigned char* src_row = (const unsigned char*) rgba;
-    unsigned char* dst_row = GUAC_RECT_MUTABLE_BUFFER(op_bounds,
-            context->buffer, context->stride, GUAC_DISPLAY_LAYER_RAW_BPP);
+    /* Iterate only over the constrained (in-bounds) region of the
+     * destination, even though the source buffer is sized to the raw,
+     * server-supplied width/height. This prevents an out-of-bounds write
+     * into the cursor layer buffer should the destination ever be
+     * constrained to something smaller than width x height (CWE-787). */
+    int cw = guac_rect_width(&op_bounds);
+    int ch = guac_rect_height(&op_bounds);
 
-    for (int dy = 0; dy < height; dy++) {
+    if (cw > 0 && ch > 0) {
 
-        const unsigned char* src_pixel = src_row;
-        uint32_t* dst_pixel = (uint32_t*) dst_row;
+        const unsigned char* src_row = (const unsigned char*) rgba;
+        unsigned char* dst_row = GUAC_RECT_MUTABLE_BUFFER(op_bounds,
+                context->buffer, context->stride, GUAC_DISPLAY_LAYER_RAW_BPP);
 
-        for (int dx = 0; dx < width; dx++) {
+        for (int dy = 0; dy < ch; dy++) {
 
-            uint8_t red   = src_pixel[0];
-            uint8_t green = src_pixel[1];
-            uint8_t blue  = src_pixel[2];
-            uint8_t alpha = src_pixel[3];
+            const unsigned char* src_pixel = src_row;
+            uint32_t* dst_pixel = (uint32_t*) dst_row;
 
-            *(dst_pixel++) = ((uint32_t) alpha << 24)
-                           | ((uint32_t) red   << 16)
-                           | ((uint32_t) green << 8)
-                           |  (uint32_t) blue;
+            for (int dx = 0; dx < cw; dx++) {
 
-            src_pixel += 4;
+                uint8_t red   = src_pixel[0];
+                uint8_t green = src_pixel[1];
+                uint8_t blue  = src_pixel[2];
+                uint8_t alpha = src_pixel[3];
+
+                *(dst_pixel++) = ((uint32_t) alpha << 24)
+                               | ((uint32_t) red   << 16)
+                               | ((uint32_t) green << 8)
+                               |  (uint32_t) blue;
+
+                src_pixel += 4;
+
+            }
+
+            /* Advance by the source (raw) stride so source pixels stay
+             * aligned to the server-supplied buffer, regardless of how many
+             * columns were actually copied into the destination. */
+            src_row += (size_t) width * 4;
+            dst_row += context->stride;
 
         }
 
-        src_row += (size_t) width * 4;
-        dst_row += context->stride;
+        /* Mark the copied region as modified */
+        guac_rect_extend(&context->dirty, &op_bounds);
 
     }
-
-    /* Mark entire cursor as modified */
-    guac_rect_extend(&context->dirty, &op_bounds);
 
     guac_display_layer_close_raw(cursor_layer, context);
     guac_display_render_thread_notify_modified(spice_client->render_thread);
