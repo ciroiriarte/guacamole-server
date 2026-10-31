@@ -38,6 +38,7 @@
 #include <guacamole/display.h>
 #include <guacamole/user.h>
 
+#include <limits.h>
 #include <pthread.h>
 
 int guac_spice_user_join_handler(guac_user* user, int argc, char** argv) {
@@ -89,9 +90,17 @@ int guac_spice_user_join_handler(guac_user* user, int argc, char** argv) {
             /* SPICE guests generally require a width that is a multiple of 8 */
             width &= ~0x7;
 
+            /* Secondary monitors are added later by the client; the initial
+             * layout is the primary monitor alone at the origin */
             if (width > 0) {
-                spice_client->resize_pending_width = width;
-                spice_client->resize_pending_height = height;
+                guac_spice_monitor* primary = &spice_client->monitors[0];
+                primary->width = width;
+                primary->height = height;
+                primary->x_position = 0;
+                primary->top_offset = 0;
+                primary->left_offset = 0;
+                primary->client_left_offset = INT_MIN;
+                spice_client->monitors_count = 1;
                 spice_client->resize_pending = 1;
             }
 

@@ -31,6 +31,8 @@
 #include <spice-client.h>
 #include <spice/vd_agent.h>
 
+#include <limits.h>
+
 /**
  * Translates a Guacamole mouse button mask into the equivalent SPICE button
  * state mask (a bitwise OR of SPICE_MOUSE_BUTTON_MASK_* values). Only the
@@ -257,17 +259,54 @@ int guac_spice_user_key_handler(guac_user* user, int keysym, int pressed) {
 }
 
 /**
+ * Recomputes the x_position and left_offset of every active monitor. A
+ * monitor's x_position is its array index. Its left_offset is the offset
+ * supplied by the client where one was given, so that arrangements other than
+ * a left-to-right row reach the guest as described; where the client supplied
+ * none, the monitors are tiled left-to-right and the offset is the sum of the
+ * widths of the monitors before it. Must be called on the SPICE event-loop
+ * thread whenever the monitor set changes.
+ *
+ * @param spice_client
+ *     The SPICE client whose monitor offsets should be recomputed.
+ */
+static void guac_spice_monitors_recalc_offsets(guac_spice_client* spice_client) {
+
+    int left = 0;
+    for (int i = 0; i < spice_client->monitors_count; i++) {
+
+        guac_spice_monitor* monitor = &spice_client->monitors[i];
+        monitor->x_position = i;
+
+        /* Honour the offset supplied by the client where there is one, so that
+         * arrangements which are not a simple left-to-right row (a vertical
+         * stack, or a row with a gap) reach the guest as described. Clients
+         * that send no offset fall back to the historical behaviour of
+         * deriving it from the widths of the preceding monitors. */
+        if (monitor->client_left_offset != INT_MIN)
+            monitor->left_offset = monitor->client_left_offset;
+        else
+            monitor->left_offset = left;
+
+        left += monitor->width;
+
+    }
+
+}
+
+/**
  * The debounce interval, in milliseconds, over which rapid client resize
  * requests are coalesced into a single guest monitors config. A burst of
- * resize requests (e.g. while the browser window is being dragged to a new
- * size) results in exactly one config push per interval, giving the guest
- * SPICE agent time to apply each size rather than being forced to reconfigure
- * on every request.
+ * resize requests (e.g. from a primary and secondary monitor window both
+ * resizing) results in exactly one config push per interval, giving the guest
+ * SPICE agent time to apply the layout rather than being forced to reconfigure
+ * on every request (which causes the guest to thrash between clone, extend, and
+ * disabled states).
  */
 #define GUAC_SPICE_RESIZE_DEBOUNCE_MS 500
 
 /**
- * Applies the most recently requested display size to the guest as a single
+ * Applies the currently requested monitor layout to the guest as a single
  * monitors config. Invoked from the debounced timer scheduled by
  * guac_spice_resize_try(); runs on the SPICE event-loop thread.
  *
@@ -294,32 +333,49 @@ static gboolean guac_spice_resize_flush(gpointer data) {
             || !spice_client->resize_display_ready)
         return G_SOURCE_REMOVE;
 
-    int width = spice_client->resize_pending_width;
-    int height = spice_client->resize_pending_height;
+    /* Enable and position every active monitor */
+    for (int i = 0; i < spice_client->monitors_count; i++) {
+        guac_spice_monitor* monitor = &spice_client->monitors[i];
+        spice_main_channel_update_display_enabled(spice_client->main_channel,
+                i, TRUE, FALSE);
+        spice_main_channel_update_display(spice_client->main_channel, i,
+                monitor->left_offset, monitor->top_offset,
+                monitor->width, monitor->height, FALSE);
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "resize_try: sending monitor %d -> +%d+%d %dx%d",
+                i, monitor->left_offset, monitor->top_offset,
+                monitor->width, monitor->height);
+    }
 
-    /* Enable and size monitor 0, then explicitly push the monitors config to
-     * the guest agent. Sending explicitly (rather than via update_display's
-     * debounced timer) ensures every resize is delivered deterministically. */
-    spice_main_channel_update_display_enabled(spice_client->main_channel, 0, TRUE, FALSE);
-    spice_main_channel_update_display(spice_client->main_channel, 0, 0, 0,
-            width, height, FALSE);
+    /* Disable any monitors that were previously enabled but have since been
+     * removed */
+    for (int i = spice_client->monitors_count;
+            i < spice_client->resize_monitors_pushed; i++)
+        spice_main_channel_update_display_enabled(spice_client->main_channel,
+                i, FALSE, FALSE);
+
+    /* Push the whole layout to the guest agent in a single, explicit monitors
+     * config (rather than via update_display's debounced timer) so every
+     * resize is delivered deterministically. */
     spice_main_channel_send_monitor_config(spice_client->main_channel);
 
+    spice_client->resize_monitors_pushed = spice_client->monitors_count;
     spice_client->resize_pending = 0;
     guac_client_log(client, GUAC_LOG_DEBUG,
-            "Sent guest display resize to %dx%d", width, height);
+            "Sent guest display config: %d monitor(s)",
+            spice_client->monitors_count);
 
     return G_SOURCE_REMOVE;
 
 }
 
 /**
- * Requests that the most recently queued display size be pushed to the guest,
- * coalescing rapid successive requests. The actual send is debounced: the
- * first request schedules a flush GUAC_SPICE_RESIZE_DEBOUNCE_MS milliseconds
- * later, and further requests within that window update the queued size but
- * reuse the already-pending timer, so the guest receives a single stable
- * config per window. Must be called on the SPICE event-loop thread.
+ * Requests that the current monitor layout be pushed to the guest, coalescing
+ * rapid successive requests. The actual send is debounced: the first request
+ * schedules a flush GUAC_SPICE_RESIZE_DEBOUNCE_MS milliseconds later, and
+ * further requests within that window update the monitor layout but reuse the
+ * already-pending timer, so the guest receives a single stable config per
+ * window. Must be called on the SPICE event-loop thread.
  */
 void guac_spice_resize_try(guac_client* client) {
 
@@ -338,8 +394,8 @@ void guac_spice_resize_try(guac_client* client) {
             || !spice_client->resize_display_ready)
         return;
 
-    /* Coalesce: if a flush is already scheduled, the latest queued size will be
-     * picked up when it fires — no need to schedule another. */
+    /* Coalesce: if a flush is already scheduled, the latest monitor layout will
+     * be picked up when it fires — no need to schedule another. */
     if (spice_client->resize_timer_source != 0)
         return;
 
@@ -395,41 +451,94 @@ void guac_spice_resize_agent_updated(SpiceMainChannel* channel,
 }
 
 /**
- * Handler which, on the SPICE event-loop thread, records a queued resize
- * request and attempts to send it (subject to guest readiness).
+ * Handler which, on the SPICE event-loop thread, applies a queued per-monitor
+ * resize request to the monitor set and attempts to send the resulting
+ * monitors config (subject to guest readiness).
  */
 static void guac_spice_do_queue_resize(guac_spice_deferred_call* call) {
 
     guac_client* client = (guac_client*) call->channel;
     guac_spice_client* spice_client = (guac_spice_client*) client->data;
 
-    spice_client->resize_pending_width = (int) call->args[0];
-    spice_client->resize_pending_height = (int) call->args[1];
-    spice_client->resize_pending = 1;
+    int width      = (int) call->args[0];
+    int height     = (int) call->args[1];
+    int x_position = (int) call->args[2];
+    int top_offset = (int) call->args[3];
+    int left_offset = (int) call->args[4];
 
+    /* Number of monitors permitted (primary plus the configured secondaries),
+     * capped at the number of heads guacd supports */
+    int max_monitors = spice_client->settings->max_secondary_monitors + 1;
+    if (max_monitors > GUAC_SPICE_MAX_MONITORS)
+        max_monitors = GUAC_SPICE_MAX_MONITORS;
+
+    /* A positive size adds or updates the monitor at x_position */
+    if (width > 0 && height > 0) {
+
+        /* Ignore out-of-range or disallowed indexes, and refuse to create a
+         * gap in the (contiguous) monitor layout */
+        if (x_position < 0 || x_position >= max_monitors
+                || x_position > spice_client->monitors_count)
+            return;
+
+        /* Clamp client-supplied dimensions so the sum of monitor widths
+         * accumulated by guac_spice_monitors_recalc_offsets() cannot overflow
+         * left_offset (an int), regardless of how many monitors are active. */
+        if (width > GUAC_DISPLAY_MAX_WIDTH)
+            width = GUAC_DISPLAY_MAX_WIDTH;
+
+        if (height > GUAC_DISPLAY_MAX_HEIGHT)
+            height = GUAC_DISPLAY_MAX_HEIGHT;
+
+        guac_spice_monitor* monitor = &spice_client->monitors[x_position];
+        monitor->width      = width;
+        monitor->height     = height;
+        monitor->top_offset = top_offset;
+        monitor->client_left_offset = left_offset;
+
+        /* Grow the active monitor count if this request adds a new monitor */
+        if (x_position == spice_client->monitors_count)
+            spice_client->monitors_count = x_position + 1;
+
+    }
+
+    /* A non-positive size closes the secondary monitor at x_position, shifting
+     * any monitors to its right down to keep the layout contiguous. The
+     * primary monitor (index 0) cannot be closed. */
+    else {
+
+        if (x_position <= 0 || x_position >= spice_client->monitors_count)
+            return;
+
+        for (int i = x_position; i < spice_client->monitors_count - 1; i++)
+            spice_client->monitors[i] = spice_client->monitors[i + 1];
+
+        spice_client->monitors_count--;
+
+    }
+
+    guac_spice_monitors_recalc_offsets(spice_client);
+
+    spice_client->resize_pending = 1;
     guac_spice_resize_try(client);
 
 }
 
-int guac_spice_user_size_handler(guac_user* user, int width, int height) {
+int guac_spice_user_size_handler(guac_user* user, int width, int height,
+        int x_position, int top_offset, int left_offset) {
 
     guac_client* client = user->client;
     guac_spice_client* spice_client = (guac_spice_client*) client->data;
 
-    /* Ignore if the main channel is not yet ready or the requested size is
-     * degenerate */
-    if (spice_client->main_channel == NULL || width <= 0 || height <= 0)
+    /* Ignore if the main channel is not yet ready */
+    if (spice_client->main_channel == NULL)
         return 0;
 
-    /* Clamp client-supplied dimensions to the largest display guacd supports */
-    if (width > GUAC_DISPLAY_MAX_WIDTH)
-        width = GUAC_DISPLAY_MAX_WIDTH;
-
-    if (height > GUAC_DISPLAY_MAX_HEIGHT)
-        height = GUAC_DISPLAY_MAX_HEIGHT;
-
-    /* SPICE guests generally require the display width to be a multiple of 8 */
-    width &= ~0x7;
+    /* SPICE guests generally require the display width to be a multiple of 8. A
+     * non-positive size is a monitor-close request and is passed through
+     * unchanged. */
+    if (width > 0)
+        width &= ~0x7;
 
     /* Queue the resize on the SPICE event-loop thread; spice-gtk channel
      * functions must not be called from user threads (see guac_spice_defer_call).
@@ -439,6 +548,9 @@ int guac_spice_user_size_handler(guac_user* user, int width, int height) {
     call->channel = client;
     call->args[0] = (unsigned int) width;
     call->args[1] = (unsigned int) height;
+    call->args[2] = (unsigned int) x_position;
+    call->args[3] = (unsigned int) top_offset;
+    call->args[4] = (unsigned int) left_offset;
     guac_spice_defer_call(call);
 
     return 0;

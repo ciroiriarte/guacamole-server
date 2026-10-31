@@ -48,6 +48,70 @@
 #define GUAC_SPICE_STATE_CHECK_INTERVAL 250
 
 /**
+ * The maximum number of monitors (primary plus secondary) that guacd will
+ * request from a SPICE guest. QXL practically supports up to four heads.
+ */
+#define GUAC_SPICE_MAX_MONITORS 4
+
+/**
+ * The size, in bytes, of the buffer used to build the "multimon-layout" JSON
+ * describing the monitor layout sent to the client. All values are integers,
+ * so this fixed bound is sufficient for GUAC_SPICE_MAX_MONITORS monitors.
+ */
+#define GUAC_SPICE_MULTIMON_LAYOUT_SIZE 512
+
+/**
+ * The size and position of a single SPICE monitor (head) within the combined
+ * display. Monitors are tiled left-to-right; left_offset is derived from the
+ * widths of the monitors to the left, while top_offset is provided by the
+ * client to allow vertical shifting.
+ */
+typedef struct guac_spice_monitor {
+
+    /**
+     * The requested width of this monitor, in pixels.
+     */
+    int width;
+
+    /**
+     * The requested height of this monitor, in pixels.
+     */
+    int height;
+
+    /**
+     * The position (index) of this monitor relative to the other monitors,
+     * starting at 0 for the primary monitor.
+     */
+    int x_position;
+
+    /**
+     * The offset of this monitor from the top of the combined display, in
+     * pixels.
+     */
+    int top_offset;
+
+    /**
+     * The offset of this monitor from the left of the combined display, in
+     * pixels. This is the value actually sent to the guest, and is either the
+     * offset supplied by the client or, when the client supplies none, the sum
+     * of the widths of all monitors to its left.
+     */
+    int left_offset;
+
+    /**
+     * The offset of this monitor from the left of the combined display as
+     * supplied by the connecting client, in pixels, or INT_MIN if the client
+     * did not supply one. A client that does not send the optional fifth
+     * argument of the "size" instruction cannot describe a layout that is
+     * anything other than a left-to-right row, so INT_MIN selects the legacy
+     * behaviour of deriving the offset from the widths of the preceding
+     * monitors.
+     */
+    int client_left_offset;
+
+} guac_spice_monitor;
+
+/**
  * SPICE-specific client data.
  */
 typedef struct guac_spice_client {
@@ -207,25 +271,43 @@ typedef struct guac_spice_client {
 
     /**
      * Dynamic display-resize state. All fields are accessed only from the SPICE
-     * event-loop thread. A client-requested resize is queued in
-     * resize_pending_width/height and sent to the guest only once the SPICE
-     * agent (advertising monitors-config support) and the display's primary
-     * surface are both ready — the readiness spice-gtk itself requires before a
-     * monitors config will actually be sent.
+     * event-loop thread. A client-requested resize updates the monitors array
+     * below and is sent to the guest only once the SPICE agent (advertising
+     * monitors-config support) and the display's primary surface are both
+     * ready — the readiness spice-gtk itself requires before a monitors config
+     * will actually be sent.
      */
     int resize_agent_ready;
     int resize_display_ready;
     int resize_pending;
-    int resize_pending_width;
-    int resize_pending_height;
+
+    /**
+     * The monitors (heads) currently requested by the client, tiled
+     * left-to-right. monitors[0] is the primary monitor. Only the first
+     * monitors_count entries are valid.
+     */
+    guac_spice_monitor monitors[GUAC_SPICE_MAX_MONITORS];
+
+    /**
+     * The number of currently-active monitors (always at least one once a
+     * resize has been requested).
+     */
+    int monitors_count;
+
+    /**
+     * The number of monitors last pushed to the guest via a monitors config.
+     * Used to disable monitors which have since been removed.
+     */
+    int resize_monitors_pushed;
 
     /**
      * The GLib source ID of the pending debounced monitors-config flush, or 0
      * if none is currently scheduled. Rapid client resize requests are
      * coalesced into a single guest monitors config, sent when this timer
-     * fires, so that the guest's SPICE agent has time to apply each size
-     * without being forced to reconfigure repeatedly. Accessed only from the
-     * SPICE event-loop thread.
+     * fires, so that the guest's SPICE agent has time to apply the layout
+     * without being forced to reconfigure repeatedly (which otherwise causes
+     * the guest to thrash between clone/extend/disabled states). Accessed only
+     * from the SPICE event-loop thread.
      */
     guint resize_timer_source;
 
